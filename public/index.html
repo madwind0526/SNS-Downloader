@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>SNS Downloader</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ── Settings Modal ──────────────────────────── -->
+  <div class="overlay" id="settingsOverlay">
+    <div class="settings-panel" id="settingsPanel">
+      <div class="settings-header">
+        <span class="settings-title">설정</span>
+        <button class="close-btn" id="settingsClose">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="settings-body">
+
+        <div class="settings-section">
+          <p class="settings-label">화면 모드</p>
+          <div class="seg-control">
+            <button class="seg-btn active" data-theme-btn="dark">다크</button>
+            <button class="seg-btn" data-theme-btn="light">라이트</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">선호 화질</p>
+          <div class="seg-control">
+            <button class="seg-btn" data-quality="480">480p</button>
+            <button class="seg-btn active" data-quality="720">720p</button>
+            <button class="seg-btn" data-quality="1080">1080p</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-row">
+            <p class="settings-label">SNS 자동 감지</p>
+            <label class="toggle">
+              <input type="checkbox" id="autoDetectToggle" checked>
+              <span class="toggle-track"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">다운로드 폴더</p>
+          <div class="settings-row folder-row">
+            <span class="folder-path" id="folderPath">/downloads</span>
+            <button class="text-btn">변경</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">접속 서버</p>
+          <div class="seg-control">
+            <button class="seg-btn active" data-server="render">Render</button>
+            <button class="seg-btn" data-server="oracle">Oracle</button>
+            <button class="seg-btn" data-server="local">Local</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">동영상 플레이어</p>
+          <div class="app-picker-row">
+            <span class="app-picker-path" id="videoPlayerDisplay">시스템 기본 앱</span>
+            <button class="text-btn" id="pickVideoPlayerBtn">찾아보기</button>
+            <button class="text-btn app-picker-reset-btn" id="resetVideoPlayerBtn">초기화</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">이미지 뷰어</p>
+          <div class="app-picker-row">
+            <span class="app-picker-path" id="imageViewerDisplay">시스템 기본 앱</span>
+            <button class="text-btn" id="pickImageViewerBtn">찾아보기</button>
+            <button class="text-btn app-picker-reset-btn" id="resetImageViewerBtn">초기화</button>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <p class="settings-label">데이터 관리</p>
+          <button class="danger-btn" id="clearHistoryBtn">다운로드 이력 지우기</button>
+          <button class="danger-btn" id="clearFilesBtn" style="margin-top:8px">폴더 파일 모두 지우기</button>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── App Shell ────────────────────────────────── -->
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-title">
+        <span class="title-main">SNS</span>
+        <span class="title-sub">Downloader</span>
+      </div>
+      <div class="header-status">
+        <!-- WiFi status -->
+        <div class="net-badge" id="wifiStatus" title="WiFi">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+            <path d="M1.42 9a16 16 0 0 1 21.16 0"/>
+            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+            <circle cx="12" cy="20" r="1" fill="currentColor"/>
+          </svg>
+        </div>
+        <!-- Cellular status -->
+        <div class="net-badge" id="cellStatus" title="셀룰러">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2"  y="16" width="3" height="6" rx="1" fill="currentColor" stroke="none"/>
+            <rect x="8"  y="11" width="3" height="11" rx="1" fill="currentColor" stroke="none" opacity=".5"/>
+            <rect x="14" y="6"  width="3" height="16" rx="1" fill="currentColor" stroke="none" opacity=".3"/>
+            <rect x="20" y="2"  width="3" height="20" rx="1" fill="currentColor" stroke="none" opacity=".2"/>
+          </svg>
+          <span class="cell-type" id="cellType"></span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="settingsBtn" title="설정">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <button class="icon-btn" id="powerBtn" title="서버 연결 끊기">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/>
+            <line x1="12" y1="2" x2="12" y2="12"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content (tab pages) -->
+    <main class="main">
+
+      <!-- ── Page: 다운로드 ──────────────────────── -->
+      <div class="page active" id="pageDownload">
+
+        <div class="input-section">
+          <div class="input-wrap" id="inputWrap">
+            <svg class="input-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+            </svg>
+            <input
+              type="url"
+              id="urlInput"
+              class="url-input"
+              placeholder="URL을 붙여넣으세요"
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <button class="paste-btn" id="pasteBtn" title="붙여넣기">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="2" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
+          </div>
+
+          <!-- Platform badge -->
+          <div class="platform-badge" id="platformBadge" style="display:none">
+            <span class="platform-icon" id="platformIcon"></span>
+            <span class="platform-name" id="platformName"></span>
+            <button class="clear-btn" id="clearBtn">✕</button>
+          </div>
+        </div>
+
+        <!-- Fetch button -->
+        <button class="primary-btn" id="fetchBtn" style="display:none">
+          정보 가져오기
+        </button>
+
+        <!-- Loading -->
+        <div class="loading" id="loading" style="display:none">
+          <div class="spinner"></div>
+          <span>미디어 정보를 가져오는 중...</span>
+        </div>
+
+        <!-- Media items (dynamically populated) -->
+        <div id="itemsContainer" class="items-container" style="display:none"></div>
+
+        <!-- Download selected button -->
+        <button class="primary-btn" id="downloadSelectedBtn" style="display:none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          선택 항목 다운로드
+          <span id="selCount" class="sel-count"></span>
+        </button>
+
+        <!-- Success state -->
+        <div class="success-card" id="successCard" style="display:none">
+          <div class="success-icon-wrap">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+          </div>
+          <p class="success-title">다운로드 완료!</p>
+          <p class="success-sub" id="successSub"></p>
+          <video id="previewVideo" class="preview-video" controls preload="metadata" style="display:none"></video>
+          <img id="previewImage" class="preview-video" alt="" style="display:none">
+          <button class="primary-btn" id="resetBtn">다음 다운로드</button>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-wrap" id="progressWrap" style="display:none">
+          <div class="progress-header">
+            <span class="progress-filename" id="progressFilename">다운로드 중...</span>
+            <span class="progress-pct" id="progressPercent">0%</span>
+          </div>
+          <div class="progress-bar-bg">
+            <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="progressSpeed"></span>
+            <span id="progressEta"></span>
+          </div>
+        </div>
+
+        <!-- Error -->
+        <div class="error-box" id="errorBox" style="display:none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span id="errorMsg"></span>
+        </div>
+
+      </div>
+
+      <!-- ── Page: 파일 ──────────────────────────── -->
+      <div class="page" id="pageFiles">
+        <div id="filesList" class="file-list"></div>
+      </div>
+
+      <!-- ── Page: 이력 ──────────────────────────── -->
+      <div class="page" id="pageHistory">
+        <div id="historyList" class="history-list"></div>
+      </div>
+
+      <!-- ── Page: 정보 ──────────────────────────── -->
+      <div class="page" id="pageInfo">
+        <div class="info-block">
+          <div class="info-logo">▶</div>
+          <p class="info-app-name">SNS Downloader</p>
+          <p class="info-version">v0.1.0 · powered by yt-dlp</p>
+          <div class="info-divider"></div>
+
+          <p class="info-section-label">지원 플랫폼</p>
+          <div class="platform-table-wrap">
+            <table class="platform-table">
+              <thead>
+                <tr><th>플랫폼</th><th>홈페이지</th><th>비고</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>YouTube</td><td><a href="https://youtube.com" target="_blank">youtube.com</a></td><td></td></tr>
+                <tr><td>Instagram</td><td><a href="https://instagram.com" target="_blank">instagram.com</a></td><td>Reels 포함</td></tr>
+                <tr><td>TikTok</td><td><a href="https://tiktok.com" target="_blank">tiktok.com</a></td><td></td></tr>
+                <tr><td>Twitter / X</td><td><a href="https://x.com" target="_blank">x.com</a></td><td></td></tr>
+                <tr><td>Facebook</td><td><a href="https://facebook.com" target="_blank">facebook.com</a></td><td></td></tr>
+                <tr><td>Pinterest</td><td><a href="https://pinterest.com" target="_blank">pinterest.com</a></td><td>동영상 핀만</td></tr>
+                <tr><td>Vimeo</td><td><a href="https://vimeo.com" target="_blank">vimeo.com</a></td><td></td></tr>
+                <tr><td>Dailymotion</td><td><a href="https://dailymotion.com" target="_blank">dailymotion.com</a></td><td></td></tr>
+                <tr><td>TED</td><td><a href="https://ted.com" target="_blank">ted.com</a></td><td></td></tr>
+                <tr><td>Imgur</td><td><a href="https://imgur.com" target="_blank">imgur.com</a></td><td>GIF·동영상만</td></tr>
+                <tr><td>Tumblr</td><td><a href="https://tumblr.com" target="_blank">tumblr.com</a></td><td>동영상만</td></tr>
+                <tr><td>Reddit</td><td><a href="https://reddit.com" target="_blank">reddit.com</a></td><td></td></tr>
+                <tr><td>Twitch</td><td><a href="https://twitch.tv" target="_blank">twitch.tv</a></td><td>VOD·클립</td></tr>
+                <tr><td>Naver TV</td><td><a href="https://tv.naver.com" target="_blank">tv.naver.com</a></td><td></td></tr>
+                <tr><td>Kakao TV</td><td><a href="https://tv.kakao.com" target="_blank">tv.kakao.com</a></td><td></td></tr>
+                <tr><td>Bilibili</td><td><a href="https://bilibili.com" target="_blank">bilibili.com</a></td><td></td></tr>
+                <tr><td>Niconico</td><td><a href="https://nicovideo.jp" target="_blank">nicovideo.jp</a></td><td></td></tr>
+                <tr><td>Kick</td><td><a href="https://kick.com" target="_blank">kick.com</a></td><td>VOD·클립</td></tr>
+                <tr><td>Rumble</td><td><a href="https://rumble.com" target="_blank">rumble.com</a></td><td></td></tr>
+                <tr><td>SoundCloud</td><td><a href="https://soundcloud.com" target="_blank">soundcloud.com</a></td><td>오디오</td></tr>
+                <tr><td>Bandcamp</td><td><a href="https://bandcamp.com" target="_blank">bandcamp.com</a></td><td>오디오</td></tr>
+                <tr><td>BitChute</td><td><a href="https://bitchute.com" target="_blank">bitchute.com</a></td><td></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="info-divider"></div>
+          <p class="info-note">개인 사용 목적으로만 사용하세요.<br>저작권법 제30조 — 사적 이용 복제는 허용.</p>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- Bottom Navigation -->
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-page="pageDownload">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span>다운로드</span>
+      </button>
+      <button class="nav-btn" data-page="pageFiles">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <span>파일</span>
+      </button>
+      <button class="nav-btn" data-page="pageHistory">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <span>이력</span>
+      </button>
+      <button class="nav-btn" data-page="pageInfo">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="8.01"/>
+          <line x1="12" y1="12" x2="12" y2="16"/>
+        </svg>
+        <span>정보</span>
+      </button>
+    </nav>
+
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

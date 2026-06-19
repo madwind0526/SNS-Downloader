@@ -1,0 +1,10 @@
+node_modules/
+downloads/
+bin/
+memory-bank/
+.claude/
+crash.log
+*.log
+*.part
+*.txt
+_picker_tmp.ps1

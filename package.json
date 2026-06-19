@@ -1,0 +1,14 @@
+{
+  "name": "sns-downloader",
+  "version": "0.1.0",
+  "description": "SNS video downloader web app",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
