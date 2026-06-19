@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: sns-downloader
+    env: node
+    plan: free
+    buildCommand: sudo apt-get install -y ffmpeg && npm install && pip install yt-dlp
+    startCommand: node server/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
