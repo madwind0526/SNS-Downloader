@@ -716,20 +716,84 @@ function renderHistory() {
   }, { once: false });
 }
 
+// ── Mobile: browse device Downloads folder via File System Access API ────────
+function showMobileFilesUI(container) {
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px;gap:16px">
+      <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".35">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg>
+      <p style="color:var(--text-sub);font-size:.9rem;text-align:center;line-height:1.6">
+        다운로드 폴더를 선택하면<br>파일 목록을 확인할 수 있습니다
+      </p>
+      <button id="openDlFolderBtn" style="
+        padding:10px 24px;border-radius:var(--radius-sm);border:none;
+        background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer">
+        📂 다운로드 폴더 열기
+      </button>
+      <p style="color:var(--text-sub);font-size:.73rem;opacity:.55">/storage/emulated/0/Download</p>
+    </div>`;
+
+  document.getElementById('openDlFolderBtn')?.addEventListener('click', async () => {
+    if (!window.showDirectoryPicker) {
+      showToast('이 브라우저에서는 지원되지 않습니다');
+      return;
+    }
+    try {
+      const dirHandle = await window.showDirectoryPicker({ startIn: 'downloads', mode: 'read' });
+      await listMobileDir(container, dirHandle);
+    } catch (e) {
+      if (e.name !== 'AbortError') showToast('폴더를 열 수 없습니다');
+    }
+  });
+}
+
+async function listMobileDir(container, dirHandle) {
+  container.innerHTML = `<div class="loading"><div class="spinner"></div><span>읽는 중...</span></div>`;
+  const files = [];
+  try {
+    for await (const [name, handle] of dirHandle) {
+      if (handle.kind === 'file') {
+        const file = await handle.getFile();
+        files.push({ name, size: file.size, mtime: file.lastModified });
+      }
+    }
+  } catch {
+    container.innerHTML = `<div class="placeholder"><p>폴더를 읽을 수 없습니다</p></div>`;
+    return;
+  }
+
+  if (!files.length) {
+    container.innerHTML = `<div class="placeholder"><p>폴더가 비어 있습니다</p></div>`;
+    return;
+  }
+
+  files.sort((a, b) => b.mtime - a.mtime); // newest first
+
+  container.innerHTML = `
+    <div>
+      <div style="padding:10px 16px;font-size:.78rem;color:var(--text-sub);display:flex;justify-content:space-between;align-items:center">
+        <span>${escHtml(dirHandle.name)}</span>
+        <span>${files.length}개 파일</span>
+      </div>
+      ${files.map(f => `
+        <div class="file-item">
+          <div class="file-info">
+            <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
+            <div class="file-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
+          </div>
+        </div>
+      `).join('')}
+    </div>`;
+}
+
 // ── Files tab ────────────────────────────────
 async function renderFiles() {
   const container = $('filesList');
 
-  // Mobile (Render): files are streamed to browser then deleted — nothing to list
+  // Mobile (Render): files live on device — open folder picker via File System Access API
   if (!isLocal) {
-    container.innerHTML = `
-      <div class="placeholder">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".3">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-        </svg>
-        <p>파일은 기기 다운로드 폴더에 저장됩니다</p>
-        <p style="font-size:.78rem;opacity:.5;margin-top:4px">서버 모드에서는 파일 목록을 제공하지 않습니다</p>
-      </div>`;
+    showMobileFilesUI(container);
     return;
   }
 
