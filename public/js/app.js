@@ -297,8 +297,15 @@ function hidePlatformLanding() {
   $('platformLanding').style.display = 'none';
 }
 
-$('platformPC')?.addEventListener('click', () => {
-  const w = 420, h = 820;
+$('platformPC')?.addEventListener('click', async () => {
+  // Prefer server-launched Chrome app mode (matches landing screen size exactly)
+  try {
+    const r = await fetch('/api/open-chrome');
+    const d = await r.json();
+    if (d.ok) return;
+  } catch {}
+  // Fallback: window.open with extra height to compensate for browser chrome
+  const w = 420, h = 870;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -310,7 +317,7 @@ $('platformPC')?.addEventListener('click', () => {
 });
 
 $('platformAndroid')?.addEventListener('click', () => {
-  const w = 420, h = 820;
+  const w = 420, h = 870;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -420,7 +427,14 @@ pasteBtn.addEventListener('click', async () => {
     const text = await navigator.clipboard.readText();
     urlInput.value = text;
     urlInput.dispatchEvent(new Event('input'));
-  } catch { urlInput.focus(); }
+  } catch {
+    // Clipboard API requires HTTPS or localhost — show prompt fallback (works on WiFi HTTP)
+    const text = prompt('URL을 붙여넣기 하세요:');
+    if (text) {
+      urlInput.value = text.trim();
+      urlInput.dispatchEvent(new Event('input'));
+    }
+  }
 });
 
 clearBtn.addEventListener('click', clearAll);
@@ -735,10 +749,13 @@ function setProgress(pct, label, speed, eta) {
 
 function triggerDownload(blob, filename) {
   const a = document.createElement('a');
-  a.href     = URL.createObjectURL(blob);
+  const blobUrl = URL.createObjectURL(blob);
+  a.href     = blobUrl;
   a.download = filename;
   a.click();
-  URL.revokeObjectURL(a.href);
+  // Delay revoke: Android may show a security dialog before saving,
+  // and the download needs the URL to still be valid after confirmation.
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
 }
 
 function showError(msg) {
@@ -949,22 +966,32 @@ async function renderFiles() {
     return;
   }
 
+  const isWifi = isPCServer && !isLocal;
   const localBtns = `
     <button class="file-action-btn" data-action="open">열기</button>
     <button class="file-action-btn" data-action="reveal">탐색기</button>
     <button class="file-action-btn danger" data-action="delete">삭제</button>`;
+  // WiFi phone: only allow re-downloading to phone (PC file delete is confusing from phone)
+  const wifiBtns = `
+    <button class="file-action-btn" data-action="redownload">폰으로 저장</button>`;
   const remoteBtns = `
     <button class="file-action-btn" data-action="redownload">재다운로드</button>
     <button class="file-action-btn danger" data-action="delete">삭제</button>`;
 
-  container.innerHTML = files.map(f => `
+  const wifiHeader = isWifi
+    ? `<div style="padding:8px 12px 4px;font-size:0.75rem;color:var(--text-sub)">PC 서버의 파일 목록 (재다운로드로 폰에 저장)</div>`
+    : '';
+
+  const btns = isLocal ? localBtns : (isWifi ? wifiBtns : remoteBtns);
+
+  container.innerHTML = wifiHeader + files.map(f => `
     <div class="file-item" data-filename="${escHtml(f.filename)}">
       <div class="file-ext-badge">${escHtml(f.ext || '?')}</div>
       <div class="file-info">
         <div class="file-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
         <div class="file-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
       </div>
-      <div class="file-actions">${isLocal ? localBtns : remoteBtns}</div>
+      <div class="file-actions">${btns}</div>
     </div>
   `).join('');
 }
@@ -989,7 +1016,7 @@ $('filesList').addEventListener('click', async e => {
     await postFileAction('/api/files/reveal', filename);
   } else if (action === 'redownload') {
     const r = await apiFetch(`/api/files/download/${encodeURIComponent(filename)}`);
-    if (!r.ok) { alert('재다운로드 실패'); return; }
+    if (!r.ok) { showToast('다운로드 실패'); return; }
     const blob = await r.blob();
     triggerDownload(blob, filename);
   } else if (action === 'delete') {
@@ -1001,7 +1028,7 @@ $('filesList').addEventListener('click', async e => {
 
 async function postFileAction(endpoint, filename, extra = {}) {
   try {
-    const r = await fetch(endpoint, {
+    const r = await apiFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename, ...extra }),

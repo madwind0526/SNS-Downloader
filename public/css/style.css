@@ -34,8 +34,8 @@ button { font-family: inherit; cursor: pointer; }
 
 html, body { height: 100%; overscroll-behavior: none; }
 
-/* Fluid type: 10px at ~267px viewport → 21px at 560px viewport */
-html { font-size: clamp(10px, 3.75vw, 21px); }
+/* Fluid type: 10px at ~267px viewport → 16px cap at ~427px viewport */
+html { font-size: clamp(10px, 3.75vw, 16px); }
 
 body {
   background: var(--bg);

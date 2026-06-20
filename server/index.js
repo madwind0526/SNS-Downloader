@@ -1031,6 +1031,26 @@ function cleanup(sessionId) {
   } catch {}
 }
 
+// ── GET /api/open-chrome ─────────────────────
+// Spawn a new Chrome app-mode window for the PC platform button
+app.get('/api/open-chrome', (req, res) => {
+  if (process.platform !== 'win32') return res.json({ ok: false, reason: 'windows-only' });
+  const localData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const chromePaths = [
+    path.join(localData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ];
+  const chromePath = chromePaths.find(p => fs.existsSync(p));
+  if (!chromePath) return res.json({ ok: false, reason: 'chrome-not-found' });
+  const url = `http://localhost:${PORT}/?mode=app`;
+  const child = spawn(chromePath, [`--app=${url}`, '--window-size=420,820', '--new-window'], {
+    detached: true, stdio: 'ignore',
+  });
+  child.unref();
+  res.json({ ok: true });
+});
+
 // ── Start ─────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
