@@ -682,7 +682,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
       const res = await apiFetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, itemUrl, format, title, mediaType }),
+        body: JSON.stringify({ url, itemUrl, format, title, mediaType, prepareOnly: !isLocal }),
       });
 
       if (!res.ok) {
@@ -700,7 +700,12 @@ downloadSelectedBtn.addEventListener('click', async () => {
         // PC: server saved file permanently — response is JSON metadata
         const data = await res.json();
         filename = data.filename;
-        lastPCFile = { filename: data.filename, mediaType };
+        if (data.downloadUrl) {
+          triggerServerDownload(data.downloadUrl, filename);
+          showToast('폰 다운로드를 시작했습니다');
+        } else {
+          lastPCFile = { filename: data.filename, mediaType };
+        }
         addToHistory({
           title, url, filename,
           platform: detectPlatform(url)?.label || '',
@@ -819,6 +824,24 @@ function triggerDownload(blob, filename) {
   // Delay revoke: Android may show a security dialog before saving,
   // and the download needs the URL to still be valid after confirmation.
   setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+}
+
+function withAuthToken(url) {
+  const token = getToken();
+  if (!token) return url;
+  const u = new URL(url, window.location.origin);
+  u.searchParams.set('token', token);
+  return u.pathname + u.search + u.hash;
+}
+
+function triggerServerDownload(downloadUrl, filename) {
+  const a = document.createElement('a');
+  a.href = withAuthToken(downloadUrl);
+  if (filename) a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function showError(msg) {

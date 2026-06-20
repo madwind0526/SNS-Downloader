@@ -245,6 +245,7 @@ process.on('unhandledRejection', reason => {
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // Auth + rate limit applied to all /api/* except /api/version and /api/auth
@@ -456,6 +457,7 @@ app.post('/api/info', async (req, res) => {
 // Render:     saves temp, streams to browser, deletes after
 app.post('/api/download', (req, res) => {
   const { url, format, title, itemUrl } = req.body;
+  const prepareOnly = req.body.prepareOnly === true || req.body.prepareOnly === 'true';
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
   if (!downloadUrl) return res.status(400).json({ error: 'URL이 필요합니다.' });
 
@@ -471,7 +473,7 @@ app.post('/api/download', (req, res) => {
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
-    return downloadDirectUrl(downloadUrl, title, res, isLocalhostReq);
+    return downloadDirectUrl(downloadUrl, title, res, isLocalhostReq, prepareOnly);
   }
 
   const sessionId = crypto.randomBytes(8).toString('hex');
@@ -559,6 +561,16 @@ app.post('/api/download', (req, res) => {
       return res.json({ ok: true, filename: finalFile, path: finalPath, size: fileSize });
     }
 
+    if (prepareOnly) {
+      const q = process.platform === 'win32' ? '' : '?delete=1';
+      return res.json({
+        ok: true,
+        filename: finalFile,
+        size: fileSize,
+        downloadUrl: `/api/files/download/${encodeURIComponent(finalFile)}${q}`,
+      });
+    }
+
     // WiFi phone or Render: stream file to browser
     // Windows (WiFi): keep file on PC after streaming
     // Linux (Render): delete temp file after streaming
@@ -596,10 +608,16 @@ app.get('/api/files/download/:filename', (req, res) => {
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
   const ext      = path.extname(fp).slice(1);
   const fileSize = fs.statSync(fp).size;
+  const deleteAfter = req.query.delete === '1' && process.platform !== 'win32';
   res.setHeader('Content-Type', getMimeType(ext));
   res.setHeader('Content-Length', fileSize);
   res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(fp))}`);
-  fs.createReadStream(fp).pipe(res);
+  res.setHeader('X-Filename', encodeURIComponent(path.basename(fp)));
+  const stream = fs.createReadStream(fp);
+  stream.pipe(res);
+  stream.on('end', () => {
+    if (deleteAfter) { try { fs.unlinkSync(fp); } catch {} }
+  });
 });
 
 // ── GET /api/files ────────────────────────────
@@ -936,7 +954,7 @@ function isPrivateHost(urlStr) {
 }
 
 // ── Direct URL download (images from CDN) ─────
-async function downloadDirectUrl(url, title, res, isLocalhostReq = false) {
+async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepareOnly = false) {
   if (isPrivateHost(url)) {
     return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
   }
@@ -974,6 +992,16 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false) {
     if (isLocalhostReq) {
       // Local PC browser: file saved permanently — return metadata only
       return res.json({ ok: true, filename: finalName, path: finalPath, size: fileSize });
+    }
+
+    if (prepareOnly) {
+      const q = process.platform === 'win32' ? '' : '?delete=1';
+      return res.json({
+        ok: true,
+        filename: finalName,
+        size: fileSize,
+        downloadUrl: `/api/files/download/${encodeURIComponent(finalName)}${q}`,
+      });
     }
 
     // WiFi phone or Render: stream to browser
