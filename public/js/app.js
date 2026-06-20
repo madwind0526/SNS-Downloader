@@ -92,7 +92,52 @@ powerBtn.addEventListener('click', () => {
 });
 
 // ── Settings panel ──────────────────────────
-settingsBtn.addEventListener('click',  () => settingsOverlay.classList.add('open'));
+const RENDER_URL = 'https://sns-downloader.onrender.com';
+
+let androidQrTab = 'wifi'; // 'wifi' | 'render'
+
+async function loadAndroidQR() {
+  const img    = $('androidQrImg');
+  const urlEl  = $('androidQrUrl');
+  if (!img) return;
+
+  let qrTarget = RENDER_URL;
+
+  if (androidQrTab === 'wifi' && isLocal) {
+    try {
+      const d = await (await fetch('/api/localip')).json();
+      qrTarget = `http://${d.ip}:${d.port}`;
+    } catch { qrTarget = 'http://localhost:3001'; }
+  }
+
+  img.src = `/api/qr?url=${encodeURIComponent(qrTarget)}`;
+  urlEl.textContent = qrTarget;
+}
+
+document.querySelectorAll('.android-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.android-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    androidQrTab = btn.dataset.tab;
+    loadAndroidQR();
+  });
+});
+
+// Hide Wi-Fi tab when not running locally (no local server to connect to)
+settingsBtn.addEventListener('click', () => {
+  settingsOverlay.classList.add('open');
+  const wifiTab = document.querySelector('.android-tab[data-tab="wifi"]');
+  if (wifiTab) {
+    wifiTab.style.display = isLocal ? '' : 'none';
+    if (!isLocal) {
+      androidQrTab = 'render';
+      document.querySelectorAll('.android-tab').forEach(b => b.classList.remove('active'));
+      document.querySelector('.android-tab[data-tab="render"]')?.classList.add('active');
+    }
+  }
+  loadAndroidQR();
+});
+
 settingsClose.addEventListener('click',() => settingsOverlay.classList.remove('open'));
 settingsOverlay.addEventListener('click', e => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');

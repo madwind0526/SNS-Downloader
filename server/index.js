@@ -6,6 +6,8 @@ const fs       = require('fs');
 const crypto   = require('crypto');
 const https    = require('https');
 const http     = require('http');
+const os       = require('os');
+const QRCode   = require('qrcode');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -33,6 +35,37 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+// ── GET /api/localip ─────────────────────────
+// Returns the PC's LAN IP so Android (same Wi-Fi) can connect directly
+app.get('/api/localip', (req, res) => {
+  const ifaces = os.networkInterfaces();
+  let ip = null;
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) { ip = iface.address; break; }
+    }
+    if (ip) break;
+  }
+  res.json({ ip: ip || 'localhost', port: PORT });
+});
+
+// ── GET /api/qr ──────────────────────────────
+// Returns an SVG QR code for the given URL
+app.get('/api/qr', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'url required' });
+  try {
+    const svg = await QRCode.toString(url, {
+      type: 'svg', margin: 2,
+      color: { dark: '#1a1a2e', light: '#ffffff' },
+    });
+    res.setHeader('Content-Type', 'image/svg+xml');
+    res.send(svg);
+  } catch (e) {
+    res.status(500).send('QR 생성 실패');
+  }
+});
 
 // ── POST /api/info ───────────────────────────
 // Returns all media items from URL (video, images in carousels/photosets)

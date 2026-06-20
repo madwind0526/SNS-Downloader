@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>SNS Downloader</title>
   <link rel="stylesheet" href="css/style.css">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#7c6af7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="SNS DL">
+  <link rel="apple-touch-icon" href="/icon.svg">
 </head>
 <body>
 
@@ -79,6 +85,19 @@
             <span class="app-picker-path" id="imageViewerDisplay">시스템 기본 앱</span>
             <button class="text-btn" id="pickImageViewerBtn">찾아보기</button>
             <button class="text-btn app-picker-reset-btn" id="resetImageViewerBtn">초기화</button>
+          </div>
+        </div>
+
+        <div class="settings-section" id="androidConnectSection">
+          <p class="settings-label">Android 연결</p>
+          <div class="android-tabs">
+            <button class="android-tab active" data-tab="wifi">Wi-Fi (같은 네트워크)</button>
+            <button class="android-tab" data-tab="render">외부 서버 (Render)</button>
+          </div>
+          <div class="android-qr-wrap">
+            <img id="androidQrImg" src="" alt="QR Code" class="android-qr">
+            <p id="androidQrUrl" class="android-qr-url"></p>
+            <p class="android-qr-hint">Android에서 카메라로 스캔하여 접속</p>
           </div>
         </div>
 
@@ -332,5 +351,10 @@
   </div>
 
   <script src="js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js');
+    }
+  </script>
 </body>
 </html>
