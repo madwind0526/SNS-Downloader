@@ -457,9 +457,11 @@ function buildFormatList(formats, mediaType) {
 }
 
 // ── Download selected items ──────────────────
-let sessionFiles = []; // server filenames downloaded this session, for cleanup
+// Mobile only: track Render server temp files for cleanup after session
+let sessionFiles = [];
 
 function deleteSessionFiles() {
+  if (isLocal) return; // PC files are permanent, never delete
   sessionFiles.forEach(fn => postFileAction('/api/files/delete', fn));
   sessionFiles = [];
 }
@@ -469,8 +471,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
     .filter(el => el.querySelector('.item-chk')?.checked);
   if (!checkedItems.length) return;
 
-  // Delete server files from previous download before starting new one
-  deleteSessionFiles();
+  if (!isLocal) deleteSessionFiles(); // Mobile: clean up previous session temp files
 
   itemsContainer.style.display      = 'none';
   downloadSelectedBtn.style.display = 'none';
@@ -506,23 +507,35 @@ downloadSelectedBtn.addEventListener('click', async () => {
         throw new Error(data.error || '다운로드 실패');
       }
 
-      const blob     = await res.blob();
-      const rawFn    = res.headers.get('X-Filename');
-      const filename = rawFn ? decodeURIComponent(rawFn) : 'video.mp4';
+      let filename;
 
-      triggerDownload(blob, filename);
-      sessionFiles.push(filename); // track for server cleanup
-
-      if (blob.type.startsWith('video/') || blob.type.startsWith('audio/') || blob.type.startsWith('image/')) {
-        lastVideoBlob = blob;
+      if (isLocal) {
+        // PC: server saved file permanently — response is JSON metadata
+        const data = await res.json();
+        filename = data.filename;
+        addToHistory({
+          title, url, filename,
+          platform: detectPlatform(url)?.label || '',
+          thumb, size: data.size || 0,
+          downloadedAt: new Date().toISOString(),
+        });
+      } else {
+        // Mobile: response is a file blob — trigger browser download
+        const blob = await res.blob();
+        const rawFn = res.headers.get('X-Filename');
+        filename = rawFn ? decodeURIComponent(rawFn) : 'video.mp4';
+        triggerDownload(blob, filename);
+        sessionFiles.push(filename);
+        if (blob.type.startsWith('video/') || blob.type.startsWith('audio/') || blob.type.startsWith('image/')) {
+          lastVideoBlob = blob;
+        }
+        addToHistory({
+          title, url, filename,
+          platform: detectPlatform(url)?.label || '',
+          thumb, size: blob.size,
+          downloadedAt: new Date().toISOString(),
+        });
       }
-
-      addToHistory({
-        title, url, filename, // store page URL (not CDN itemUrl) for re-fetch
-        platform: detectPlatform(url)?.label || '',
-        thumb, size: blob.size,
-        downloadedAt: new Date().toISOString(),
-      });
 
       setProgress(100, '완료!', '');
       successCount++;
@@ -548,7 +561,11 @@ downloadSelectedBtn.addEventListener('click', async () => {
 const previewImage = $('previewImage');
 
 function showSuccess(count, blob) {
-  successSub.textContent = `${count}개 파일 저장됨`;
+  // PC: no blob (file saved on server) — show folder hint
+  // Mobile: blob available — show preview
+  successSub.textContent = isLocal
+    ? `${count}개 파일이 다운로드 폴더에 저장됨`
+    : `${count}개 파일 저장됨`;
   errorBox.style.display = 'none';
 
   // Revoke any previous blob URLs
@@ -702,6 +719,20 @@ function renderHistory() {
 // ── Files tab ────────────────────────────────
 async function renderFiles() {
   const container = $('filesList');
+
+  // Mobile (Render): files are streamed to browser then deleted — nothing to list
+  if (!isLocal) {
+    container.innerHTML = `
+      <div class="placeholder">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".3">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <p>파일은 기기 다운로드 폴더에 저장됩니다</p>
+        <p style="font-size:.78rem;opacity:.5;margin-top:4px">서버 모드에서는 파일 목록을 제공하지 않습니다</p>
+      </div>`;
+    return;
+  }
+
   container.innerHTML = `<div class="loading"><div class="spinner"></div><span>불러오는 중...</span></div>`;
 
   let files;

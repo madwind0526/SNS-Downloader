@@ -348,7 +348,8 @@ app.post('/api/info', async (req, res) => {
 });
 
 // ── POST /api/download ───────────────────────
-// Runs yt-dlp, saves to downloads/, streams to client, keeps file for Files tab
+// PC/Windows: saves permanently to downloads folder, returns JSON (no browser download)
+// Render/Linux: saves temp, streams to browser, deletes after
 app.post('/api/download', (req, res) => {
   const { url, format, title, itemUrl } = req.body;
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
@@ -434,8 +435,14 @@ app.post('/api/download', (req, res) => {
     const fileSize  = fs.statSync(finalPath).size;
     const mimeType  = getMimeType(ext);
 
-    console.log(`[download] streaming ${finalFile} (${fileSize} bytes)`);
+    if (process.platform === 'win32') {
+      // PC local: file is permanently saved — return metadata only, no browser download
+      console.log(`[download] saved ${finalFile} (${fileSize} bytes) → ${finalPath}`);
+      return res.json({ ok: true, filename: finalFile, path: finalPath, size: fileSize });
+    }
 
+    // Render/remote: stream to browser then delete
+    console.log(`[download] streaming ${finalFile} (${fileSize} bytes)`);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Length', fileSize);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(finalFile)}`);
@@ -446,11 +453,8 @@ app.post('/api/download', (req, res) => {
     stream.pipe(res);
 
     stream.on('end', () => {
-      // On Render/Linux: free disk space after streaming. On local Windows: keep file in downloads folder.
-      if (process.platform !== 'win32') {
-        try { fs.unlinkSync(finalPath); } catch {}
-      }
-      console.log('[download] stream complete');
+      try { fs.unlinkSync(finalPath); } catch {}
+      console.log('[download] stream complete, temp deleted');
     });
     stream.on('error', err => {
       console.error('[download] stream error:', err.message);
@@ -824,6 +828,12 @@ async function downloadDirectUrl(url, title, res) {
     console.log(`[download-direct] saved ${finalName} (${fileSize} bytes)`);
     responded = true;
 
+    if (process.platform === 'win32') {
+      // PC local: file saved permanently — return metadata only
+      return res.json({ ok: true, filename: finalName, path: finalPath, size: fileSize });
+    }
+
+    // Render/remote: stream then delete
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Length', fileSize);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(finalName)}`);
@@ -832,6 +842,7 @@ async function downloadDirectUrl(url, title, res) {
 
     const readStream = fs.createReadStream(finalPath);
     readStream.pipe(res);
+    readStream.on('end', () => { try { fs.unlinkSync(finalPath); } catch {} });
     readStream.on('error', err => {
       console.error('[download-direct] stream error:', err.message);
     });

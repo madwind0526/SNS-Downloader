@@ -20,9 +20,9 @@
 }
 
 [data-theme="light"] {
-  --bg:       #f0f0f8;
-  --surface:  #ffffff;
-  --surface2: #e8e8f4;
+  --bg:       #ffffff;
+  --surface:  #f0f0f8;
+  --surface2: #e4e4f0;
   --border:   #d0d0e0;
   --text:     #1a1a2e;
   --text-sub: #8080a0;
