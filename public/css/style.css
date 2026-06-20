@@ -783,7 +783,18 @@ body {
   align-items: center;
   gap: 0.571rem;
   animation: slideUp .2s ease;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
 }
+.history-item:hover { border-color: var(--accent-border); background: var(--surface2); }
+.history-refetch-icon {
+  font-size: 1rem;
+  color: var(--accent);
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.history-item:hover .history-refetch-icon { opacity: 1; }
 
 .history-thumb {
   width: 76px;

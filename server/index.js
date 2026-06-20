@@ -224,6 +224,19 @@ app.post('/api/download', (req, res) => {
   });
 });
 
+// ── GET /api/files/download/:filename ────────
+// Re-download a file from server to browser
+app.get('/api/files/download/:filename', (req, res) => {
+  const fp = safeFilePath(decodeURIComponent(req.params.filename));
+  if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
+  const ext      = path.extname(fp).slice(1);
+  const fileSize = fs.statSync(fp).size;
+  res.setHeader('Content-Type', getMimeType(ext));
+  res.setHeader('Content-Length', fileSize);
+  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(fp))}`);
+  fs.createReadStream(fp).pipe(res);
+});
+
 // ── GET /api/files ────────────────────────────
 // List files in downloads/ sorted by newest first
 app.get('/api/files', (req, res) => {

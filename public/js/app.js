@@ -332,10 +332,21 @@ function buildFormatList(formats, mediaType) {
 }
 
 // ── Download selected items ──────────────────
+const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+let sessionFiles = []; // server filenames downloaded this session, for cleanup
+
+function deleteSessionFiles() {
+  sessionFiles.forEach(fn => postFileAction('/api/files/delete', fn));
+  sessionFiles = [];
+}
+
 downloadSelectedBtn.addEventListener('click', async () => {
   const checkedItems = [...itemsContainer.querySelectorAll('.media-item')]
     .filter(el => el.querySelector('.item-chk')?.checked);
   if (!checkedItems.length) return;
+
+  // Delete server files from previous download before starting new one
+  deleteSessionFiles();
 
   itemsContainer.style.display      = 'none';
   downloadSelectedBtn.style.display = 'none';
@@ -346,7 +357,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
   let lastVideoBlob = null;
 
   for (let i = 0; i < checkedItems.length; i++) {
-    const el      = checkedItems[i];
+    const el        = checkedItems[i];
     const itemUrl   = el.dataset.itemUrl   || url;
     const title     = el.dataset.title     || '';
     const thumb     = el.dataset.thumb     || '';
@@ -376,13 +387,14 @@ downloadSelectedBtn.addEventListener('click', async () => {
       const filename = rawFn ? decodeURIComponent(rawFn) : 'video.mp4';
 
       triggerDownload(blob, filename);
+      sessionFiles.push(filename); // track for server cleanup
 
       if (blob.type.startsWith('video/') || blob.type.startsWith('audio/') || blob.type.startsWith('image/')) {
         lastVideoBlob = blob;
       }
 
       addToHistory({
-        title, url: itemUrl, filename,
+        title, url, filename, // store page URL (not CDN itemUrl) for re-fetch
         platform: detectPlatform(url)?.label || '',
         thumb, size: blob.size,
         downloadedAt: new Date().toISOString(),
@@ -434,6 +446,7 @@ function showSuccess(count, blob) {
 }
 
 resetBtn.addEventListener('click', () => {
+  deleteSessionFiles(); // remove downloaded files from server
   if (previewVideo.src?.startsWith('blob:')) { URL.revokeObjectURL(previewVideo.src); previewVideo.src = ''; }
   if (previewImage.src?.startsWith('blob:')) { URL.revokeObjectURL(previewImage.src); previewImage.src = ''; }
   previewVideo.style.display = 'none';
@@ -498,7 +511,7 @@ function renderHistory() {
     return;
   }
   container.innerHTML = list.map(h => `
-    <div class="history-item">
+    <div class="history-item" data-url="${escHtml(h.url || '')}" title="클릭하면 다운로드 준비">
       ${h.thumb
         ? `<img class="history-thumb" src="${h.thumb}" alt="" onerror="this.outerHTML='<div class=history-thumb-placeholder>▶</div>'">`
         : `<div class="history-thumb-placeholder">▶</div>`
@@ -513,8 +526,19 @@ function renderHistory() {
           ${escHtml(h.filename || '')}
         </div>
       </div>
+      <div class="history-refetch-icon">↓</div>
     </div>
   `).join('');
+
+  container.addEventListener('click', e => {
+    const item = e.target.closest('.history-item');
+    if (!item || e.target.closest('.history-badge')) return;
+    const pageUrl = item.dataset.url;
+    if (!pageUrl) return;
+    document.querySelector('.nav-btn[data-page="pageDownload"]').click();
+    urlInput.value = pageUrl;
+    urlInput.dispatchEvent(new Event('input'));
+  }, { once: false });
 }
 
 // ── Files tab ────────────────────────────────
@@ -542,6 +566,14 @@ async function renderFiles() {
     return;
   }
 
+  const localBtns = `
+    <button class="file-action-btn" data-action="open">열기</button>
+    <button class="file-action-btn" data-action="reveal">탐색기</button>
+    <button class="file-action-btn danger" data-action="delete">삭제</button>`;
+  const remoteBtns = `
+    <button class="file-action-btn" data-action="redownload">재다운로드</button>
+    <button class="file-action-btn danger" data-action="delete">삭제</button>`;
+
   container.innerHTML = files.map(f => `
     <div class="file-item" data-filename="${escHtml(f.filename)}">
       <div class="file-ext-badge">${escHtml(f.ext || '?')}</div>
@@ -549,11 +581,7 @@ async function renderFiles() {
         <div class="file-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
         <div class="file-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
       </div>
-      <div class="file-actions">
-        <button class="file-action-btn" data-action="open">열기</button>
-        <button class="file-action-btn" data-action="reveal">탐색기</button>
-        <button class="file-action-btn danger" data-action="delete">삭제</button>
-      </div>
+      <div class="file-actions">${isLocal ? localBtns : remoteBtns}</div>
     </div>
   `).join('');
 }
@@ -576,6 +604,11 @@ $('filesList').addEventListener('click', async e => {
     await postFileAction('/api/files/open', filename, appPath ? { appPath } : {});
   } else if (action === 'reveal') {
     await postFileAction('/api/files/reveal', filename);
+  } else if (action === 'redownload') {
+    const r = await fetch(`/api/files/download/${encodeURIComponent(filename)}`);
+    if (!r.ok) { alert('재다운로드 실패'); return; }
+    const blob = await r.blob();
+    triggerDownload(blob, filename);
   } else if (action === 'delete') {
     if (!confirm(`"${filename}"\n삭제할까요?`)) return;
     const ok = await postFileAction('/api/files/delete', filename);
