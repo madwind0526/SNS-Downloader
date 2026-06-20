@@ -87,14 +87,39 @@ app.post('/api/info', (req, res) => {
         filesize:  f.filesize  || null,
       });
 
+      const VIDEO_EXTS = new Set(['mp4','webm','mkv','avi','mov','m4v','flv','ts']);
+
       // yt-dlp outputs one JSON object per line for playlists
       const lines = stdout.trim().split('\n').filter(l => l.trim().startsWith('{'));
       const items = lines.map(l => {
         const info = JSON.parse(l);
-        const fmts = info.formats || [];
+        let fmts = info.formats || [];
+
+        // Some extractors (e.g. Instagram carousel) return a direct `url` instead of `formats`
+        // Synthesize a single format entry so the UI shows a selectable option
+        if (!fmts.length && info.url) {
+          const isVidExt = VIDEO_EXTS.has(info.ext || '');
+          fmts = [{
+            format_id: 'direct',
+            ext:       info.ext  || 'mp4',
+            height:    info.height || null,
+            width:     info.width  || null,
+            fps:       info.fps    || null,
+            vcodec:    isVidExt ? 'h264' : 'none',
+            acodec:    isVidExt ? 'aac'  : 'none',
+            video_ext: isVidExt ? (info.ext || 'mp4') : 'none',
+            audio_ext: 'none',
+            filesize:  info.filesize || null,
+          }];
+        }
+
         const isImage = ['jpg','jpeg','png','gif','webp'].includes(info.ext) || !fmts.some(hasVideo);
+
+        // Use direct CDN url (info.url) when available — avoids fetching the page again on download
+        const itemUrl = info.url || info.webpage_url || info.original_url || url;
+
         return {
-          itemUrl:   info.webpage_url || info.original_url || url,
+          itemUrl,
           title:     info.title,
           uploader:  info.uploader || info.channel || '',
           thumbnail: info.thumbnail,
@@ -121,8 +146,8 @@ app.post('/api/download', (req, res) => {
 
   console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title}`);
 
-  // Direct download for image CDN URLs (yt-dlp can't handle them)
-  if (req.body.mediaType === 'image' && /^https?:\/\//.test(downloadUrl)) {
+  // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
+  if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
     return downloadDirectUrl(downloadUrl, title, res);
   }
 
