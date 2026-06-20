@@ -17,6 +17,24 @@ const YT_DLP = process.platform === 'win32'
   ? path.join(__dirname, '..', 'bin', 'yt-dlp.exe')
   : 'yt-dlp';
 
+// Simple server-side config (cookies path, etc.)
+const CONFIG_FILE = path.join(__dirname, 'config.json');
+function loadConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
+}
+function saveConfig(data) {
+  try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
+}
+
+// Returns cookies args for yt-dlp if a valid cookies.txt is configured
+function cookiesArgs() {
+  const c = loadConfig();
+  if (c.cookiesPath && fs.existsSync(c.cookiesPath)) {
+    return ['--cookies', c.cookiesPath];
+  }
+  return [];
+}
+
 const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
 if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 
@@ -79,6 +97,7 @@ app.post('/api/info', (req, res) => {
     '--retries', '3', '--fragment-retries', '3',
     '--socket-timeout', '30',
     '--playlist-items', '1-10',
+    ...cookiesArgs(),
     url,
   ];
 
@@ -193,6 +212,7 @@ app.post('/api/download', (req, res) => {
     '--no-playlist', '--no-warnings',
     '--retries', '3', '--fragment-retries', '5',
     '--socket-timeout', '30',
+    ...cookiesArgs(),
     '-f', format || 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     '-o', outTemplate,
     downloadUrl,
@@ -335,6 +355,45 @@ app.get('/api/settings/pick-app', (req, res) => {
   exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
     const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
+    res.json({ path: picked || null });
+  });
+});
+
+// ── GET /api/settings/cookies ────────────────
+app.get('/api/settings/cookies', (req, res) => {
+  const c = loadConfig();
+  res.json({ path: c.cookiesPath || null });
+});
+
+// ── DELETE /api/settings/cookies ─────────────
+app.delete('/api/settings/cookies', (req, res) => {
+  const c = loadConfig();
+  delete c.cookiesPath;
+  saveConfig(c);
+  res.json({ ok: true });
+});
+
+// ── GET /api/settings/pick-cookies ───────────
+// Opens Windows file picker for cookies.txt and saves the path
+app.get('/api/settings/pick-cookies', (req, res) => {
+  if (process.platform !== 'win32') return res.json({ path: null });
+  const tmpPs1 = path.join(DOWNLOADS_DIR, '_picker_cookies.ps1');
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$d = New-Object System.Windows.Forms.OpenFileDialog',
+    '$d.Title = "쿠키 파일 선택 (cookies.txt)"',
+    '$d.Filter = "텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*"',
+    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
+  ].join('\n');
+  try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch { return res.json({ path: null }); }
+  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
+    try { fs.unlinkSync(tmpPs1); } catch {}
+    const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
+    if (picked) {
+      const c = loadConfig();
+      c.cookiesPath = picked;
+      saveConfig(c);
+    }
     res.json({ path: picked || null });
   });
 });

@@ -714,6 +714,43 @@ $('resetImageViewerBtn').addEventListener('click', () => {
 
 refreshAppPickerUI();
 
+// ── Cookies settings ─────────────────────────
+async function refreshCookiesUI() {
+  const display = $('cookiesDisplay');
+  const resetBtn = $('resetCookiesBtn');
+  if (!display) return;
+  try {
+    const d = await (await fetch('/api/settings/cookies')).json();
+    if (d.path) {
+      display.textContent = d.path.split(/[/\\]/).pop();
+      resetBtn.disabled = false;
+    } else {
+      display.textContent = '설정 안 됨';
+      resetBtn.disabled = true;
+    }
+  } catch {}
+}
+
+$('pickCookiesBtn')?.addEventListener('click', async () => {
+  try {
+    const d = await (await fetch('/api/settings/pick-cookies')).json();
+    if (d.path) refreshCookiesUI();
+  } catch {}
+});
+
+$('resetCookiesBtn')?.addEventListener('click', async () => {
+  await fetch('/api/settings/cookies', { method: 'DELETE' });
+  refreshCookiesUI();
+});
+
+// Hide cookies section when not running locally (server-side cookies only make sense locally)
+if (!isLocal) {
+  const cookiesSec = $('cookiesSection');
+  if (cookiesSec) cookiesSec.style.display = 'none';
+}
+
+refreshCookiesUI();
+
 // ── Platform table links — force new window ──
 document.querySelector('.platform-table-wrap')?.addEventListener('click', e => {
   const a = e.target.closest('a[href]');
