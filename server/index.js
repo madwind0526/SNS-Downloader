@@ -562,12 +562,11 @@ app.post('/api/download', (req, res) => {
     }
 
     if (prepareOnly) {
-      const q = process.platform === 'win32' ? '' : '?delete=1';
       return res.json({
         ok: true,
         filename: finalFile,
         size: fileSize,
-        downloadUrl: `/api/files/download/${encodeURIComponent(finalFile)}${q}`,
+        downloadUrl: `/api/files/download/${encodeURIComponent(finalFile)}`,
       });
     }
 
@@ -995,12 +994,11 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
     }
 
     if (prepareOnly) {
-      const q = process.platform === 'win32' ? '' : '?delete=1';
       return res.json({
         ok: true,
         filename: finalName,
         size: fileSize,
-        downloadUrl: `/api/files/download/${encodeURIComponent(finalName)}${q}`,
+        downloadUrl: `/api/files/download/${encodeURIComponent(finalName)}`,
       });
     }
 

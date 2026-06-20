@@ -195,6 +195,7 @@ const successCard         = $('successCard');
 const successSub          = $('successSub');
 const previewVideo        = $('previewVideo');
 const resetBtn            = $('resetBtn');
+const saveToPhoneBtn      = $('saveToPhoneBtn');
 const errorBox            = $('errorBox');
 const errorMsg            = $('errorMsg');
 const wifiStatus          = $('wifiStatus');
@@ -663,6 +664,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
   let successCount  = 0;
   let lastVideoBlob = null;
   let lastPCFile    = null; // { filename, mediaType } for PC preview
+  const serverDownloads = [];
 
   for (let i = 0; i < checkedItems.length; i++) {
     const el        = checkedItems[i];
@@ -701,6 +703,8 @@ downloadSelectedBtn.addEventListener('click', async () => {
         const data = await res.json();
         filename = data.filename;
         if (data.downloadUrl) {
+          serverDownloads.push({ url: data.downloadUrl, filename });
+          sessionFiles.push(filename);
           triggerServerDownload(data.downloadUrl, filename);
           showToast('폰 다운로드를 시작했습니다');
         } else {
@@ -746,7 +750,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
   progressWrap.style.display = 'none';
 
   if (successCount > 0) {
-    showSuccess(successCount, lastVideoBlob, lastPCFile);
+    showSuccess(successCount, lastVideoBlob, lastPCFile, serverDownloads);
   } else {
     showError('다운로드에 실패했습니다.');
     itemsContainer.style.display      = 'flex';
@@ -757,11 +761,14 @@ downloadSelectedBtn.addEventListener('click', async () => {
 // ── Success state ─────────────────────────────
 const previewImage = $('previewImage');
 
-function showSuccess(count, blob, pcFile) {
+function showSuccess(count, blob, pcFile, serverDownloads = []) {
   successSub.textContent = pcFile
     ? `${count}개 파일이 다운로드 폴더에 저장됨`
     : `${count}개 파일 저장됨`;
   errorBox.style.display = 'none';
+  if (serverDownloads.length) {
+    successSub.textContent = '서버 다운로드 완료. 저장 버튼을 눌러 폰에 저장하세요.';
+  }
 
   // Revoke previous blob URLs
   if (previewVideo.src?.startsWith('blob:')) URL.revokeObjectURL(previewVideo.src);
@@ -789,6 +796,15 @@ function showSuccess(count, blob, pcFile) {
     }
   }
 
+  if (saveToPhoneBtn) {
+    saveToPhoneBtn.style.display = serverDownloads.length ? 'block' : 'none';
+    saveToPhoneBtn.onclick = () => {
+      serverDownloads.forEach((d, idx) => {
+        setTimeout(() => triggerServerDownload(d.url, d.filename), idx * 350);
+      });
+    };
+  }
+
   successCard.style.display = 'flex';
   successCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
@@ -801,6 +817,7 @@ resetBtn.addEventListener('click', () => {
   previewImage.src = '';
   previewVideo.style.display = 'none';
   previewImage.style.display = 'none';
+  if (saveToPhoneBtn) saveToPhoneBtn.style.display = 'none';
   clearAll();
 });
 
