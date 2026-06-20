@@ -1,7 +1,7 @@
 const express  = require('express');
 const cors     = require('cors');
 const path     = require('path');
-const { execFile, spawn, exec } = require('child_process');
+const { execFile, spawn, exec, execSync } = require('child_process');
 const fs       = require('fs');
 const crypto   = require('crypto');
 const https    = require('https');
@@ -26,13 +26,55 @@ function saveConfig(data) {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
 }
 
-// Returns cookies args for yt-dlp if a valid cookies.txt is configured
+// Returns cookies args for yt-dlp — file mode or browser mode
 function cookiesArgs() {
   const c = loadConfig();
-  if (c.cookiesPath && fs.existsSync(c.cookiesPath)) {
-    return ['--cookies', c.cookiesPath];
-  }
+  if (c.cookiesPath && fs.existsSync(c.cookiesPath)) return ['--cookies', c.cookiesPath];
+  if (c.cookiesBrowser) return ['--cookies-from-browser', c.cookiesBrowser];
   return [];
+}
+
+// ── Browser cookie extraction via yt-dlp ─────────────────────────
+// yt-dlp handles its own DPAPI decryption. We try each browser in order.
+// If the browser is currently running, its SQLite DB is locked and yt-dlp fails.
+// In that case we surface a clear "close browser and retry" message.
+const BROWSERS = ['chrome', 'edge', 'firefox', 'chromium', 'brave'];
+
+async function extractCookiesViaBrowser() {
+  let lockedBrowser = null;
+
+  for (const browser of BROWSERS) {
+    try {
+      await new Promise((resolve, reject) => {
+        execFile(YT_DLP,
+          ['--cookies-from-browser', browser, '--skip-download',
+           '--quiet', '--no-warnings', 'https://www.instagram.com/'],
+          { timeout: 20000 },
+          (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve()
+        );
+      });
+      console.log(`[cookies] using browser: ${browser}`);
+      const c = loadConfig();
+      c.cookiesBrowser = browser;
+      delete c.cookiesPath;
+      saveConfig(c);
+      return browser;
+    } catch (e) {
+      const msg = String(e);
+      if (msg.includes('Could not copy') && !lockedBrowser) lockedBrowser = browser;
+      console.log(`[cookies] ${browser}: ${msg.split('\n')[0]}`);
+    }
+  }
+
+  if (lockedBrowser) {
+    // Browser is running but SQLite is locked — ask user to close it briefly
+    throw Object.assign(
+      new Error(`${lockedBrowser} 쿠키를 읽으려면 브라우저를 잠시 닫아야 합니다.\n${lockedBrowser}을 닫은 후 [재시도]를 눌러주세요.`),
+      { needClose: true, browser: lockedBrowser }
+    );
+  }
+
+  throw new Error('브라우저에서 Instagram 로그인을 찾을 수 없습니다.\n브라우저에서 instagram.com에 로그인 후 다시 시도해주세요.');
 }
 
 const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
@@ -86,107 +128,105 @@ app.get('/api/qr', async (req, res) => {
 });
 
 // ── POST /api/info ───────────────────────────
-// Returns all media items from URL (video, images in carousels/photosets)
-app.post('/api/info', (req, res) => {
+// Returns all media items from URL. Auto-retries with Chrome cookies on login errors.
+app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL이 필요합니다.' });
 
-  // No --no-playlist: fetch all items (carousel, photoset, etc.), limit to 10
-  const args = [
+  const BASE_ARGS = [
     '--dump-json', '--no-warnings',
     '--retries', '3', '--fragment-retries', '3',
     '--socket-timeout', '30',
     '--playlist-items', '1-10',
-    ...cookiesArgs(),
-    url,
   ];
 
-  execFile(YT_DLP, args, { timeout: 90000 }, async (err, stdout, stderr) => {
-    if (err) {
-      const errText = stderr || err.message;
-      // Fallback: yt-dlp cannot handle image-only pages — scrape og:image from HTML
-      if (errText.includes('No video could be found') || errText.includes('no video') ||
-          errText.includes('No video formats found')) {
+  const runYtDlp = () => new Promise((resolve, reject) => {
+    execFile(YT_DLP, [...BASE_ARGS, ...cookiesArgs(), url], { timeout: 90000 },
+      (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve(stdout)
+    );
+  });
+
+  const parseStdout = (stdout) => {
+    const hasVideo = f =>
+      (f.vcodec && f.vcodec !== 'none') ||
+      (f.video_ext && f.video_ext !== 'none' && f.video_ext !== 'images');
+
+    const mapFormat = f => ({
+      id: f.format_id, ext: f.ext, height: f.height || null, width: f.width || null,
+      fps: f.fps || null, vcodec: f.vcodec || 'none', acodec: f.acodec || 'none',
+      video_ext: f.video_ext || 'none', audio_ext: f.audio_ext || 'none', filesize: f.filesize || null,
+    });
+
+    const VIDEO_EXTS = new Set(['mp4','webm','mkv','avi','mov','m4v','flv','ts']);
+
+    const lines = stdout.trim().split('\n').filter(l => l.trim().startsWith('{'));
+    return lines.map(l => {
+      const info = JSON.parse(l);
+      let fmts = info.formats || [];
+      // Instagram-style: direct url instead of formats array — synthesize one entry
+      if (!fmts.length && info.url) {
+        const isVid = VIDEO_EXTS.has(info.ext || '');
+        fmts = [{ format_id: 'direct', ext: info.ext || 'mp4',
+          height: info.height || null, width: info.width || null, fps: info.fps || null,
+          vcodec: isVid ? 'h264' : 'none', acodec: isVid ? 'aac' : 'none',
+          video_ext: isVid ? (info.ext || 'mp4') : 'none', audio_ext: 'none', filesize: info.filesize || null }];
+      }
+      const isImage = ['jpg','jpeg','png','gif','webp'].includes(info.ext) || !fmts.some(hasVideo);
+      return {
+        itemUrl:   info.url || info.webpage_url || info.original_url || url,
+        title:     info.title,
+        uploader:  info.uploader || info.channel || '',
+        thumbnail: info.thumbnail,
+        duration:  info.duration,
+        mediaType: isImage ? 'image' : 'video',
+        formats:   fmts.map(mapFormat),
+      };
+    });
+  };
+
+  const isLoginError = t =>
+    t.includes('login_required') || t.includes('empty media') ||
+    t.includes('Login required') || t.includes('로그인');
+
+  try {
+    // First attempt
+    let stdout;
+    try {
+      stdout = await runYtDlp();
+    } catch (errText) {
+      // Auto-retry: let yt-dlp extract browser cookies and try again
+      if (isLoginError(errText)) {
+        console.log('[info] login required — trying browser cookies...');
+        try {
+          await extractCookiesViaBrowser();
+          stdout = await runYtDlp(); // second attempt with browser cookies
+        } catch (retryErr) {
+          const msg = typeof retryErr === 'string' ? retryErr : retryErr.message;
+          return res.status(400).json({
+            error: msg,
+            needClose: retryErr.needClose || false,
+            browser: retryErr.browser || null,
+          });
+        }
+      } else if (errText.includes('No video could be found') || errText.includes('no video') ||
+                 errText.includes('No video formats found')) {
         const images = await extractImagesFromPage(url);
         if (images.length) return res.json({ items: images });
-        // Platform-specific message when HTML fallback also fails
-        if (errText.includes('[Tumblr]')) {
-          return res.status(400).json({ error: 'Tumblr 이미지 포스트는 지원되지 않습니다. 동영상 포스트 URL을 사용해 주세요.' });
-        }
-        if (errText.includes('[Pinterest]')) {
-          return res.status(400).json({ error: 'Pinterest 이미지 핀은 지원되지 않습니다. 동영상이 포함된 핀 URL을 사용해 주세요.' });
-        }
+        if (errText.includes('[Tumblr]'))   return res.status(400).json({ error: 'Tumblr 이미지 포스트는 지원되지 않습니다.' });
+        if (errText.includes('[Pinterest]')) return res.status(400).json({ error: 'Pinterest 이미지 핀은 지원되지 않습니다.' });
         return res.status(400).json({ error: '이 포스트에서 미디어를 찾을 수 없습니다.' });
+      } else {
+        return res.status(400).json({ error: parseYtDlpError(errText) });
       }
-      return res.status(400).json({ error: parseYtDlpError(errText) });
     }
 
-    try {
-      const hasVideo = f =>
-        (f.vcodec && f.vcodec !== 'none') ||
-        (f.video_ext && f.video_ext !== 'none' && f.video_ext !== 'images');
-
-      const mapFormat = f => ({
-        id:        f.format_id,
-        ext:       f.ext,
-        height:    f.height    || null,
-        width:     f.width     || null,
-        fps:       f.fps       || null,
-        vcodec:    f.vcodec    || 'none',
-        acodec:    f.acodec    || 'none',
-        video_ext: f.video_ext || 'none',
-        audio_ext: f.audio_ext || 'none',
-        filesize:  f.filesize  || null,
-      });
-
-      const VIDEO_EXTS = new Set(['mp4','webm','mkv','avi','mov','m4v','flv','ts']);
-
-      // yt-dlp outputs one JSON object per line for playlists
-      const lines = stdout.trim().split('\n').filter(l => l.trim().startsWith('{'));
-      const items = lines.map(l => {
-        const info = JSON.parse(l);
-        let fmts = info.formats || [];
-
-        // Some extractors (e.g. Instagram carousel) return a direct `url` instead of `formats`
-        // Synthesize a single format entry so the UI shows a selectable option
-        if (!fmts.length && info.url) {
-          const isVidExt = VIDEO_EXTS.has(info.ext || '');
-          fmts = [{
-            format_id: 'direct',
-            ext:       info.ext  || 'mp4',
-            height:    info.height || null,
-            width:     info.width  || null,
-            fps:       info.fps    || null,
-            vcodec:    isVidExt ? 'h264' : 'none',
-            acodec:    isVidExt ? 'aac'  : 'none',
-            video_ext: isVidExt ? (info.ext || 'mp4') : 'none',
-            audio_ext: 'none',
-            filesize:  info.filesize || null,
-          }];
-        }
-
-        const isImage = ['jpg','jpeg','png','gif','webp'].includes(info.ext) || !fmts.some(hasVideo);
-
-        // Use direct CDN url (info.url) when available — avoids fetching the page again on download
-        const itemUrl = info.url || info.webpage_url || info.original_url || url;
-
-        return {
-          itemUrl,
-          title:     info.title,
-          uploader:  info.uploader || info.channel || '',
-          thumbnail: info.thumbnail,
-          duration:  info.duration,
-          mediaType: isImage ? 'image' : 'video',
-          formats:   fmts.map(mapFormat),
-        };
-      });
-
-      if (!items.length) throw new Error('no items');
-      res.json({ items });
-    } catch (e) {
-      res.status(500).json({ error: '응답 파싱 실패' });
-    }
-  });
+    const items = parseStdout(stdout);
+    if (!items.length) return res.status(500).json({ error: '응답 파싱 실패' });
+    res.json({ items });
+  } catch (e) {
+    console.error('[info] unexpected error:', e);
+    res.status(500).json({ error: '서버 오류' });
+  }
 });
 
 // ── POST /api/download ───────────────────────
@@ -363,6 +403,17 @@ app.get('/api/settings/pick-app', (req, res) => {
 app.get('/api/settings/cookies', (req, res) => {
   const c = loadConfig();
   res.json({ path: c.cookiesPath || null });
+});
+
+// ── POST /api/settings/auto-cookies ──────────
+// Manually trigger browser cookie extraction via yt-dlp
+app.post('/api/settings/auto-cookies', async (req, res) => {
+  try {
+    const browser = await extractCookiesViaBrowser();
+    res.json({ ok: true, browser, count: '설정됨' });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 // ── DELETE /api/settings/cookies ─────────────

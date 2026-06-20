@@ -261,7 +261,17 @@ fetchBtn.addEventListener('click', async () => {
       body: JSON.stringify({ url }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || '알 수 없는 오류');
+    if (!res.ok) {
+      loading.style.display = 'none';
+      fetchBtn.style.display = 'block';
+      // Special case: browser is running and SQLite is locked
+      if (data.needClose) {
+        showErrorWithRetry(data.error);
+      } else {
+        showError(data.error || '알 수 없는 오류');
+      }
+      return;
+    }
 
     loading.style.display = 'none';
     renderItems(data.items);
@@ -521,6 +531,19 @@ function showError(msg) {
   errorBox.style.display = 'flex';
 }
 
+function showErrorWithRetry(msg) {
+  resetResults();
+  errorMsg.innerHTML = `${escHtml(msg)}<br><br>
+    <button id="retryAfterClose" style="margin-top:8px;padding:8px 18px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.9rem">
+      브라우저 닫은 후 재시도
+    </button>`;
+  errorBox.style.display = 'flex';
+  $('retryAfterClose')?.addEventListener('click', () => {
+    errorBox.style.display = 'none';
+    fetchBtn.click();
+  });
+}
+
 function formatDuration(s) {
   if (!s) return '';
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
@@ -717,33 +740,33 @@ refreshAppPickerUI();
 // ── Cookies settings ─────────────────────────
 async function refreshCookiesUI() {
   const display = $('cookiesDisplay');
-  const resetBtn = $('resetCookiesBtn');
   if (!display) return;
   try {
     const d = await (await fetch('/api/settings/cookies')).json();
-    if (d.path) {
-      display.textContent = d.path.split(/[/\\]/).pop();
-      resetBtn.disabled = false;
-    } else {
-      display.textContent = '설정 안 됨';
-      resetBtn.disabled = true;
-    }
-  } catch {}
+    display.textContent = d.path ? '쿠키 설정됨 ✓' : '미설정 (다운로드 시 자동 추출)';
+  } catch {
+    display.textContent = '상태 확인 불가';
+  }
 }
 
-$('pickCookiesBtn')?.addEventListener('click', async () => {
+$('syncCookiesBtn')?.addEventListener('click', async () => {
+  const btn = $('syncCookiesBtn');
+  const display = $('cookiesDisplay');
+  btn.disabled = true;
+  btn.textContent = '추출 중...';
+  display.textContent = 'Chrome 쿠키 읽는 중...';
   try {
-    const d = await (await fetch('/api/settings/pick-cookies')).json();
-    if (d.path) refreshCookiesUI();
-  } catch {}
+    const d = await (await fetch('/api/settings/auto-cookies', { method: 'POST' })).json();
+    display.textContent = d.ok ? `쿠키 ${d.count}개 동기화됨 ✓` : (d.error || '실패');
+  } catch {
+    display.textContent = '오류 발생';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '지금 동기화';
+  }
 });
 
-$('resetCookiesBtn')?.addEventListener('click', async () => {
-  await fetch('/api/settings/cookies', { method: 'DELETE' });
-  refreshCookiesUI();
-});
-
-// Hide cookies section when not running locally (server-side cookies only make sense locally)
+// Hide cookies section when not running locally
 if (!isLocal) {
   const cookiesSec = $('cookiesSection');
   if (cookiesSec) cookiesSec.style.display = 'none';
