@@ -469,7 +469,8 @@ app.post('/api/download', (req, res) => {
 
   // Detect if request came from the local PC browser (vs WiFi phone or Render)
   const clientIp = req.ip || req.socket?.remoteAddress || '';
-  const isLocalhostReq = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(clientIp);
+  const isLocalhostReq = process.platform === 'win32' &&
+    ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(clientIp);
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
