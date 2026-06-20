@@ -4,7 +4,7 @@ if not exist node_modules npm install
 
 :: Kill any existing process on port 3001
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3001 " ^| findstr "LISTENING"') do (
-  echo Stopping existing server (PID %%a)...
+  echo Stopping existing server PID %%a...
   taskkill /PID %%a /F >nul 2>&1
 )
 timeout /t 1 /nobreak >nul
@@ -17,12 +17,13 @@ powershell -NoProfile -Command "for ($i=0; $i -lt 30; $i++) { try { Invoke-WebRe
 
 :open
 set CHROME=
-if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"  set CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe
-if exist "%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"  set CHROME=%PROGRAMFILES%\Google\Chrome\Application\chrome.exe
-if exist "%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe" set CHROME=%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe
+if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" set "CHROME=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+if exist "%PROGRAMFILES%\Google\Chrome\Application\chrome.exe" set "CHROME=%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"
+if exist "%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe" set "CHROME=%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"
 
-if "%CHROME%"=="" (
+if not defined CHROME (
   start "" "http://localhost:3001/?mode=app"
-) else (
-  start "" "%CHROME%" "--app=http://localhost:3001/?mode=app" --window-size=420,820
+  goto :eof
 )
+
+start "" "%CHROME%" "--app=http://localhost:3001/?mode=app" --window-size=420,820
