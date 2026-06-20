@@ -1,151 +1,138 @@
-# SNS Downloader v1.2
+# SNS Downloader v1.10
 
-YouTube, Instagram, TikTok, Twitter/X 등 1000개 이상의 사이트에서 동영상·이미지를 다운로드하는 웹 앱입니다.  
-PC(Windows)에서는 로컬 서버로 실행하고, 모바일에서는 Render 클라우드 서버에 접속합니다.
+SNS 영상/이미지를 다운로드하는 Node.js + yt-dlp 기반 웹앱입니다.
 
----
+- PC에서는 Windows 로컬 서버를 실행하고 `localhost:3001`로 접속합니다.
+- 핸드폰에서는 Render 서버 또는 같은 Wi-Fi의 PC 서버로 접속합니다.
+- Render mode와 Phone via PC mode 모두 서버가 먼저 파일을 준비한 뒤, 폰 브라우저가 다운로드 URL로 저장합니다.
 
-## 파일 구조
+## 실행 모드
 
-```
-VideoDownloader/
-├── start.bat              ← PC 실행 (서버 시작 + Chrome 앱 창 열기)
-├── stop.bat               ← 서버 종료
-├── server/
-│   ├── index.js           ← Express 서버 (yt-dlp 실행, API, SSE 진행률)
-│   └── config.json        ← 설정 저장 (다운로드 폴더 경로, 쿠키 경로 등)
-├── public/
-│   ├── index.html         ← 메인 UI (단일 페이지 앱)
-│   ├── js/app.js          ← 프론트엔드 로직
-│   └── css/style.css      ← 스타일 (다크/라이트 테마)
-├── bin/
-│   └── yt-dlp.exe         ← 다운로드 엔진 (Windows 바이너리)
-├── downloads/             ← PC 다운로드 폴더 (기본값, 설정에서 변경 가능)
-├── render.yaml            ← Render 배포 설정
-└── package.json
-```
+| 모드 | 접속 위치 | 서버 위치 | 저장 동작 |
+| --- | --- | --- | --- |
+| PC Local | `http://localhost:3001` | 내 PC | PC 다운로드 폴더에 저장 |
+| Phone via PC | `http://<PC-IP>:3001` | 내 PC | PC에 준비 후 폰의 기본 Download 폴더로 저장 |
+| Render | `https://sns-downloader.onrender.com` | Render | Render에 준비 후 폰의 기본 Download 폴더로 저장 |
 
----
+Android Chrome은 웹앱이 임의로 `/storage/emulated/0/Documents/SNS-Downloader`에 직접 저장하는 것을 보장하지 않습니다. 실제 저장 위치는 보통 `/sdcard/Download`입니다.
 
-## PC 설치 방법
+## 주요 기능
 
-### 필수 조건
+- YouTube, Instagram, TikTok, X/Twitter 등 yt-dlp 지원 사이트 다운로드
+- 영상/이미지/오디오 다운로드
+- PC 다운로드 폴더 변경
+- Phone via PC용 QR 접속
+- Render/Phone via PC에서 `폰으로 저장` 재시도
+- 서버 준비 파일 미리보기
+- Instagram/YouTube/X 등 로그인 필요 영상용 `cookies.txt` 등록
 
-- **Node.js** 18 이상 — https://nodejs.org
-- **Google Chrome**
-- **Windows 10/11**
+## 설치
 
-### 설치 절차
+필수:
+
+- Windows 10/11
+- Node.js 18 이상
+- Chrome
+- `bin/yt-dlp.exe`
+
+설치:
 
 ```bash
-# 1. 저장소 클론
-git clone https://github.com/madwi/sns-downloader.git
-cd sns-downloader
-
-# 2. 의존성 설치
 npm install
 ```
 
-> `start.bat`을 처음 실행하면 `node_modules`가 없을 경우 자동으로 `npm install`을 실행합니다.
+## PC에서 실행
 
----
+```bat
+start.bat
+```
 
-## PC 사용 방법
+동작:
 
-### 1. 서버 시작
+- 기존 3001 포트 서버를 종료합니다.
+- `node server/index.js`를 실행합니다.
+- Chrome 앱 창을 `http://localhost:3001/?mode=app`으로 엽니다.
 
-`start.bat` 더블클릭
+서버 종료:
 
-- 서버 콘솔 창이 열림 (닫으면 서버 종료)
-- Chrome이 자동으로 앱 창(420×820)을 열어줌
+```bat
+stop.bat
+```
 
-### 2. 서버 종료
+또는 서버 콘솔 창을 닫습니다.
 
-- 서버 콘솔 창의 **X** 버튼 클릭
-- 또는 `stop.bat` 더블클릭
+## 핸드폰에서 사용
 
-### 3. 다운로드
+### Render mode
 
-1. SNS URL을 입력란에 붙여넣기
-2. 분석 버튼 클릭 → 화질/포맷 선택
-3. 다운로드 버튼 클릭
-4. `파일` 탭에서 다운로드된 파일 확인·열기
+1. 핸드폰 Chrome에서 `https://sns-downloader.onrender.com` 접속
+2. URL 입력 후 다운로드
+3. 성공 화면의 미리보기 확인
+4. 저장이 자동으로 안 되면 `폰으로 저장` 버튼 클릭
+5. 파일은 보통 `/sdcard/Download`에 저장됨
 
-### 4. 다운로드 폴더 변경
+Render는 무료 플랜 특성상 처음 접속 시 로딩이 걸릴 수 있습니다.
 
-설정(⚙) → 다운로드 폴더 → **변경** 버튼
+### Phone via PC mode
 
----
+1. PC에서 `start.bat` 실행
+2. 설정의 Android 연결 또는 QR로 `http://<PC-IP>:3001` 접속
+3. 다운로드
+4. PC 서버에 파일이 준비되고, 폰에서 `폰으로 저장`으로 저장 가능
 
-## 모바일 사용 방법
+Phone via PC는 PC의 쿠키/다운로드 환경을 사용할 수 있어 로그인 필요 영상에 더 유리합니다.
 
-### 방법 A: Render 클라우드 서버 (공개 콘텐츠만)
+## 쿠키 설정
 
-브라우저에서 Render URL 직접 접속  
-쿠키 없이 로그인 불필요한 공개 영상만 다운로드 가능
+Instagram, YouTube, X 등에서 로그인이 필요한 영상은 `cookies.txt`가 필요할 수 있습니다.
 
-### 방법 B: 같은 WiFi에서 PC 서버 사용 (권장)
+1. Chrome에서 `Get cookies.txt LOCALLY` 확장 설치
+2. 대상 사이트에 로그인
+3. 확장에서 `cookies.txt` export
+4. 앱의 쿠키 설정 영역에 드래그 또는 파일 선택
 
-PC와 폰이 같은 WiFi에 연결된 경우 PC의 로컬 서버를 직접 사용할 수 있습니다.  
-쿠키를 통한 로그인 콘텐츠 다운로드도 가능합니다.
+주의:
 
-1. PC에서 `start.bat` 실행 (서버 시작)
-2. 앱 설정(⚙) → **Android 연결** 탭 → **Wi-Fi** QR코드 스캔
-3. 폰 브라우저에서 PC 서버로 직접 접속
+- PC Local/Phone via PC는 PC 서버의 쿠키를 사용합니다.
+- Render mode는 Render 서버에 별도 쿠키 파일이 등록되어 있어야 동일하게 동작합니다.
+- Chrome App-Bound Encryption 때문에 Chrome 쿠키 자동 추출은 제한될 수 있습니다.
 
----
+## Render 배포
 
-## Instagram 등 로그인 필요 사이트
+Render 설정은 `render.yaml`을 사용합니다.
 
-쿠키 파일을 사용하면 로그인이 필요한 콘텐츠를 다운로드할 수 있습니다. **(1회만 설정)**
+```yaml
+services:
+  - type: web
+    name: sns-downloader
+    env: node
+    plan: free
+    buildCommand: apt-get install -y ffmpeg && npm install && pip install yt-dlp
+    startCommand: node server/index.js
+```
 
-1. Chrome에서 **Get cookies.txt LOCALLY** 확장 설치
-2. `instagram.com` 접속 (로그인 상태)
-3. 확장 아이콘 클릭 → **Export As** → `cookies.txt` 저장
-4. 앱 헤더의 **쿠키** 버튼 클릭 → 파일 드롭 또는 파일 선택
+GitHub `main`에 push하면 Render가 자동 배포합니다. 배포 확인:
 
-> Render(모바일 클라우드) 서버에서는 쿠키 기능을 사용할 수 없습니다.
+```text
+https://sns-downloader.onrender.com/api/version
+```
 
----
-
-## 지원 플랫폼
-
-| 플랫폼 | 비고 |
-|--------|------|
-| YouTube | 화질 선택 가능 |
-| Instagram | 쿠키 필요 (비공개 계정) |
-| TikTok | |
-| Twitter / X | |
-| Facebook | |
-| Naver TV / Kakao TV | |
-| Bilibili / Niconico | |
-| Twitch | VOD·클립 |
-| Vimeo / Dailymotion | |
-| Reddit / Rumble | |
-| SoundCloud / Bandcamp | 오디오 |
-| 기타 1000+ 사이트 | yt-dlp 지원 사이트 전체 |
-
----
-
-## API 엔드포인트 (개발자용)
+## 주요 API
 
 | Method | Path | 설명 |
-|--------|------|------|
-| `POST` | `/api/info` | URL 분석 (제목·썸네일·포맷 목록) |
-| `POST` | `/api/download` | 다운로드 실행 |
-| `GET` | `/api/progress/:id` | SSE 진행률 스트리밍 |
-| `GET` | `/api/files` | 다운로드 폴더 파일 목록 |
-| `GET` | `/api/version` | 앱 버전 반환 |
-| `GET` | `/api/settings/download-folder` | 현재 다운로드 폴더 경로 |
-| `GET` | `/api/settings/pick-download-folder` | Windows 폴더 선택 대화상자 |
-| `GET` | `/api/settings/open-downloads-folder` | 탐색기로 다운로드 폴더 열기 |
+| --- | --- | --- |
+| `GET` | `/api/version` | 앱 버전/플랫폼 확인 |
+| `POST` | `/api/info` | URL 분석 |
+| `POST` | `/api/download` | 서버 다운로드 실행 |
+| `GET` | `/api/files` | 서버 준비 파일 목록 |
+| `GET` | `/api/files/download/:filename` | 서버 파일 다운로드 또는 미리보기 |
+| `POST` | `/api/files/delete` | 서버 파일 삭제 |
+| `GET` | `/api/settings/download-folder` | PC 다운로드 폴더 조회 |
+| `GET` | `/api/settings/pick-download-folder` | PC 다운로드 폴더 선택 |
 
----
+## 현재 주의사항
 
-## 기술 스택
-
-- **백엔드**: Node.js + Express
-- **프론트엔드**: Vanilla HTML / CSS / JS (빌드 도구 없음)
-- **다운로드 엔진**: yt-dlp (오픈소스, 1000+ 사이트 지원)
-- **클라우드 배포**: Render (모바일 접속용)
-- **진행률 스트리밍**: Server-Sent Events (SSE)
+- Android Chrome의 실제 저장 위치는 앱이 강제할 수 없습니다.
+- Render free 플랜은 첫 요청이 느릴 수 있습니다.
+- Render 서버는 프록시 뒤에 있으므로 Linux/Render에서는 localhost 요청으로 판정하지 않도록 처리되어 있습니다.
+- 서버 다운로드 미리보기는 `/api/files/download/:filename?preview=1`과 Range 요청을 사용합니다.
