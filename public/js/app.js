@@ -316,7 +316,13 @@ $('platformPC')?.addEventListener('click', async () => {
   if (!popup || popup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
 });
 
-$('platformAndroid')?.addEventListener('click', () => {
+$('platformAndroid')?.addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/open-chrome?target=render');
+    const d = await r.json();
+    if (d.ok) return;
+  } catch {}
+
   const w = 420, h = 870;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);

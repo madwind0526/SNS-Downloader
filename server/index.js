@@ -1043,8 +1043,15 @@ app.get('/api/open-chrome', (req, res) => {
   ];
   const chromePath = chromePaths.find(p => fs.existsSync(p));
   if (!chromePath) return res.json({ ok: false, reason: 'chrome-not-found' });
-  const url = `http://localhost:${PORT}/?mode=app`;
-  const child = spawn(chromePath, [`--app=${url}`, '--window-size=420,820', '--new-window'], {
+  const target = req.query.target === 'render'
+    ? 'https://sns-downloader.onrender.com'
+    : `http://localhost:${PORT}/?mode=app`;
+  const child = spawn(chromePath, [
+    `--app=${target}`,
+    '--window-size=420,820',
+    '--force-device-scale-factor=1',
+    '--new-window',
+  ], {
     detached: true, stdio: 'ignore',
   });
   child.unref();
