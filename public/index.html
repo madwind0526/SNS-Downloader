@@ -127,6 +127,9 @@
             <img id="androidQrImg" src="" alt="QR Code" class="android-qr">
             <p id="androidQrUrl" class="android-qr-url"></p>
             <p class="android-qr-hint">Android에서 카메라로 스캔하여 접속</p>
+            <p id="androidQrFirewallHint" class="android-qr-firewall" style="display:none">
+              연결 안 될 경우: Windows 방화벽에서 Node.js 허용 필요
+            </p>
           </div>
         </div>
 
@@ -403,6 +406,9 @@
       </div>
 
     </main>
+
+    <!-- Connection mode badge -->
+    <div id="connectionBadge" class="connection-badge"></div>
 
     <!-- Bottom Navigation -->
     <nav class="bottom-nav">

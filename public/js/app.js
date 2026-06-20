@@ -51,7 +51,8 @@ function showAuthScreen() {
                    color:var(--text);font-size:1rem;outline:none"/>
           <button id="authBtn"
             style="padding:10px 18px;border-radius:var(--radius-sm);border:none;
-                   background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer">
+                   background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer;
+                   white-space:nowrap;flex-shrink:0">
             확인
           </button>
         </div>
@@ -219,6 +220,8 @@ document.querySelectorAll('.android-tab').forEach(btn => {
     document.querySelectorAll('.android-tab').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     androidQrTab = btn.dataset.tab;
+    const fwHint = $('androidQrFirewallHint');
+    if (fwHint) fwHint.style.display = androidQrTab === 'wifi' ? '' : 'none';
     loadAndroidQR();
   });
 });
@@ -235,6 +238,8 @@ settingsBtn.addEventListener('click', () => {
       document.querySelector('.android-tab[data-tab="render"]')?.classList.add('active');
     }
   }
+  const fwHint = $('androidQrFirewallHint');
+  if (fwHint) fwHint.style.display = (isLocal && androidQrTab === 'wifi') ? '' : 'none';
   loadAndroidQR();
 });
 
@@ -270,6 +275,12 @@ fetch('/api/version').then(r => r.json()).then(d => {
   if (pl) pl.textContent = v;
 }).catch(() => {});
 
+// ── Connection mode badge ─────────────────────
+const connectionBadge = $('connectionBadge');
+if (connectionBadge) {
+  connectionBadge.setAttribute('data-label', isLocal ? 'PC Local' : 'Render Server');
+}
+
 // ── Platform Landing ──────────────────────────
 const isAppMode = new URLSearchParams(location.search).has('mode');
 
@@ -281,7 +292,7 @@ function hidePlatformLanding() {
 }
 
 $('platformPC')?.addEventListener('click', () => {
-  const w = 420, h = 820;
+  const w = window.innerWidth, h = window.innerHeight;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -293,11 +304,13 @@ $('platformPC')?.addEventListener('click', () => {
 });
 
 $('platformAndroid')?.addEventListener('click', () => {
-  const w = screen.availWidth, h = screen.availHeight;
+  const w = window.innerWidth, h = window.innerHeight;
+  const left = Math.round((screen.availWidth  - w) / 2);
+  const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
     RENDER_URL,
     'snsdownloader-mobile',
-    `width=${w},height=${h},left=0,top=0,toolbar=no,location=no,menubar=no,status=no,resizable=yes`
+    `width=${w},height=${h},left=${left},top=${top},toolbar=no,location=no,menubar=no,status=no,resizable=yes`
   );
   if (!popup || popup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
 });
@@ -573,6 +586,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
   const url = urlInput.value.trim();
   let successCount  = 0;
   let lastVideoBlob = null;
+  let lastPCFile    = null; // { filename, mediaType } for PC preview
 
   for (let i = 0; i < checkedItems.length; i++) {
     const el        = checkedItems[i];
@@ -602,10 +616,15 @@ downloadSelectedBtn.addEventListener('click', async () => {
 
       let filename;
 
-      if (isLocal) {
+      // Detect PC vs mobile mode from Content-Type header (not hostname),
+      // so WiFi LAN access (e.g. 192.168.x.x) behaves correctly as PC mode.
+      const isPCResponse = (res.headers.get('Content-Type') || '').includes('application/json');
+
+      if (isPCResponse) {
         // PC: server saved file permanently — response is JSON metadata
         const data = await res.json();
         filename = data.filename;
+        lastPCFile = { filename: data.filename, mediaType };
         addToHistory({
           title, url, filename,
           platform: detectPlatform(url)?.label || '',
@@ -613,7 +632,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
           downloadedAt: new Date().toISOString(),
         });
       } else {
-        // Mobile: response is a file blob — trigger browser download
+        // Mobile/Render: response is a file blob — trigger browser download
         const blob = await res.blob();
         const rawFn = res.headers.get('X-Filename');
         filename = rawFn ? decodeURIComponent(rawFn) : 'video.mp4';
@@ -642,7 +661,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
   progressWrap.style.display = 'none';
 
   if (successCount > 0) {
-    showSuccess(successCount, lastVideoBlob);
+    showSuccess(successCount, lastVideoBlob, lastPCFile);
   } else {
     showError('다운로드에 실패했습니다.');
     itemsContainer.style.display      = 'flex';
@@ -653,17 +672,17 @@ downloadSelectedBtn.addEventListener('click', async () => {
 // ── Success state ─────────────────────────────
 const previewImage = $('previewImage');
 
-function showSuccess(count, blob) {
-  // PC: no blob (file saved on server) — show folder hint
-  // Mobile: blob available — show preview
-  successSub.textContent = isLocal
+function showSuccess(count, blob, pcFile) {
+  successSub.textContent = pcFile
     ? `${count}개 파일이 다운로드 폴더에 저장됨`
     : `${count}개 파일 저장됨`;
   errorBox.style.display = 'none';
 
-  // Revoke any previous blob URLs
+  // Revoke previous blob URLs
   if (previewVideo.src?.startsWith('blob:')) URL.revokeObjectURL(previewVideo.src);
   if (previewImage.src?.startsWith('blob:')) URL.revokeObjectURL(previewImage.src);
+  previewVideo.src = '';
+  previewImage.src = '';
   previewVideo.style.display = 'none';
   previewImage.style.display = 'none';
 
@@ -673,6 +692,16 @@ function showSuccess(count, blob) {
   } else if (blob?.type.startsWith('video/') || blob?.type.startsWith('audio/')) {
     previewVideo.src           = URL.createObjectURL(blob);
     previewVideo.style.display = 'block';
+  } else if (pcFile) {
+    // PC: preview from server endpoint
+    const previewUrl = `/api/files/download/${encodeURIComponent(pcFile.filename)}`;
+    if (pcFile.mediaType === 'image') {
+      previewImage.src           = previewUrl;
+      previewImage.style.display = 'block';
+    } else {
+      previewVideo.src           = previewUrl;
+      previewVideo.style.display = 'block';
+    }
   }
 
   successCard.style.display = 'flex';
@@ -681,8 +710,10 @@ function showSuccess(count, blob) {
 
 resetBtn.addEventListener('click', () => {
   deleteSessionFiles(); // remove downloaded files from server
-  if (previewVideo.src?.startsWith('blob:')) { URL.revokeObjectURL(previewVideo.src); previewVideo.src = ''; }
-  if (previewImage.src?.startsWith('blob:')) { URL.revokeObjectURL(previewImage.src); previewImage.src = ''; }
+  if (previewVideo.src?.startsWith('blob:')) URL.revokeObjectURL(previewVideo.src);
+  if (previewImage.src?.startsWith('blob:')) URL.revokeObjectURL(previewImage.src);
+  previewVideo.src = '';
+  previewImage.src = '';
   previewVideo.style.display = 'none';
   previewImage.style.display = 'none';
   clearAll();

@@ -275,14 +275,35 @@ app.post('/api/auth', (req, res) => {
 // Returns the PC's LAN IP so Android (same Wi-Fi) can connect directly
 app.get('/api/localip', (req, res) => {
   const ifaces = os.networkInterfaces();
-  let ip = null;
-  for (const name of Object.keys(ifaces)) {
-    for (const iface of ifaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) { ip = iface.address; break; }
+  const virtualName = /(vethernet|hyper-v|virtualbox|vmware|wsl|docker|loopback|tailscale|zerotier)/i;
+  const candidates = [];
+
+  for (const [name, list] of Object.entries(ifaces)) {
+    if (virtualName.test(name)) continue;
+    for (const iface of list) {
+      if (iface.family !== 'IPv4' || iface.internal) continue;
+      candidates.push({ name, address: iface.address });
     }
-    if (ip) break;
   }
-  res.json({ ip: ip || 'localhost', port: PORT });
+
+  candidates.sort((a, b) => {
+    const score = c => {
+      const n = c.name.toLowerCase();
+      if (n.includes('wi-fi') || n.includes('wifi') || n.includes('wlan')) return 0;
+      if (n.includes('ethernet') || n.includes('이더넷')) return 1;
+      return 2;
+    };
+    const privateScore = c => {
+      if (c.address.startsWith('192.168.')) return 0;
+      if (c.address.startsWith('10.')) return 1;
+      if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(c.address)) return 2;
+      return 3;
+    };
+    return score(a) - score(b) || privateScore(a) - privateScore(b);
+  });
+
+  const ip = candidates[0]?.address || 'localhost';
+  res.json({ ip, port: PORT, candidates });
 });
 
 // ── GET /api/qr ──────────────────────────────
@@ -381,7 +402,14 @@ app.post('/api/info', async (req, res) => {
       if (isLoginError(errText)) {
         console.log('[info] login required — retrying with cookies...');
         try {
-          await extractCookiesViaBrowser();
+          // If cookies.txt or browser cookies already configured, use them directly
+          // without trying to extract from browser (extraction only needed for first-time setup)
+          const existingCookies = cookiesArgs();
+          if (existingCookies.length === 0) {
+            await extractCookiesViaBrowser();
+          } else {
+            console.log('[info] using existing cookies:', existingCookies[0], existingCookies[1] || '');
+          }
           stdout = await runYtDlp(true); // second attempt with cookies
         } catch (retryErr) {
           const msg = typeof retryErr === 'string' ? retryErr : retryErr.message;

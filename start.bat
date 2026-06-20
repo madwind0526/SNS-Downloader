@@ -2,10 +2,15 @@
 cd /d "%~dp0"
 if not exist node_modules npm install
 
-netstat -an 2>nul | find ":3001 " >nul 2>&1
+:: Check if server is already running and responsive (not just port open)
+powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'http://localhost:3001/health' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
 if not errorlevel 1 goto :open
+
+:: Server not ready — start it
 start "SNS Downloader Server" node server/index.js
-timeout /t 2 /nobreak >nul
+
+:: Poll /health every 500ms until server responds (up to 15 seconds)
+powershell -NoProfile -Command "for ($i=0; $i -lt 30; $i++) { try { Invoke-WebRequest -Uri 'http://localhost:3001/health' -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop | Out-Null; break } catch {} ; Start-Sleep -Milliseconds 500 }"
 
 :open
 set CHROME=
