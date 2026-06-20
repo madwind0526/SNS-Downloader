@@ -1,3 +1,5 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+
 const express  = require('express');
 const cors     = require('cors');
 const path     = require('path');
@@ -8,9 +10,48 @@ const https    = require('https');
 const http     = require('http');
 const os       = require('os');
 const QRCode   = require('qrcode');
+const { rateLimit } = require('express-rate-limit');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
+
+// ── Access token auth ────────────────────────
+// Set ACCESS_TOKEN env var (Render dashboard) to enable auth.
+// Empty / unset = no auth (local PC use).
+const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
+
+function authMiddleware(req, res, next) {
+  if (!ACCESS_TOKEN) return next(); // auth disabled (no token configured)
+  // Requests from localhost always pass — PC local use
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+  const token = req.headers['x-token'] || req.query.token;
+  if (token === ACCESS_TOKEN) return next();
+  res.status(401).json({ error: '인증이 필요합니다.', needAuth: true });
+}
+
+// ── Rate limiting (Render only — no token = local, skip) ─
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: ACCESS_TOKEN ? 30 : 0, // 0 = disabled
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+  skip: () => !ACCESS_TOKEN,
+});
+
+const downloadLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: ACCESS_TOKEN ? 10 : 0,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: '다운로드 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+  skip: () => !ACCESS_TOKEN,
+});
+
+// ── Concurrent download counter ───────────────
+let activeDownloads = 0;
+const MAX_CONCURRENT = 3;
 
 // yt-dlp binary path — Windows local uses .exe, Linux (Render) uses system-installed binary
 const YT_DLP = process.platform === 'win32'
@@ -206,12 +247,29 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Auth + rate limit applied to all /api/* except /api/version and /api/auth
+app.use('/api', (req, res, next) => {
+  if (req.path === '/version' || req.path === '/auth') return next();
+  authMiddleware(req, res, next);
+});
+app.use('/api/info',     apiLimiter);
+app.use('/api/download', downloadLimiter);
+
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ── GET /api/version ─────────────────────────
 const { version } = require('../package.json');
 app.get('/api/version', (req, res) => res.json({ version }));
+
+// ── POST /api/auth ────────────────────────────
+// Validates access token. Returns authRequired flag so client knows whether to show auth screen.
+app.post('/api/auth', (req, res) => {
+  if (!ACCESS_TOKEN) return res.json({ ok: true, authRequired: false });
+  const token = (req.body.token || '').trim();
+  if (token === ACCESS_TOKEN) return res.json({ ok: true, authRequired: true });
+  res.status(401).json({ ok: false, authRequired: true, error: '비밀번호가 올바르지 않습니다.' });
+});
 
 // ── GET /api/localip ─────────────────────────
 // Returns the PC's LAN IP so Android (same Wi-Fi) can connect directly
@@ -363,7 +421,11 @@ app.post('/api/download', (req, res) => {
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
   if (!downloadUrl) return res.status(400).json({ error: 'URL이 필요합니다.' });
 
-  console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title}`);
+  if (activeDownloads >= MAX_CONCURRENT) {
+    return res.status(429).json({ error: `지금 다운로드가 많습니다(${MAX_CONCURRENT}개 한도). 잠시 후 다시 시도해주세요.` });
+  }
+
+  console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title} active=${activeDownloads + 1}`);
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
@@ -387,9 +449,15 @@ app.post('/api/download', (req, res) => {
   if (!isAudioOnly && !isImage) args.push('--merge-output-format', 'mp4');
   if (isAudioOnly)              args.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
 
+  activeDownloads++;
   const proc = spawn(YT_DLP, args);
   let stderr   = '';
   let responded = false;
+
+  const releaseSlot = () => { activeDownloads = Math.max(0, activeDownloads - 1); };
+  proc.on('close', releaseSlot);
+  proc.on('error', releaseSlot);
+  res.on('close', () => { if (!responded) proc.kill(); });
 
   proc.stderr.on('data', d => { stderr += d.toString(); });
 
@@ -803,8 +871,30 @@ async function extractImagesFromPage(url) {
   }
 }
 
+// ── SSRF guard — block private/loopback/link-local IPs ──
+function isPrivateHost(urlStr) {
+  try {
+    const host = new URL(urlStr).hostname;
+    if (/^(localhost|.*\.local)$/i.test(host)) return true;
+    const private4 = [
+      /^127\./,
+      /^10\./,
+      /^172\.(1[6-9]|2\d|3[01])\./,
+      /^192\.168\./,
+      /^169\.254\./,
+      /^0\./,
+    ];
+    if (private4.some(r => r.test(host))) return true;
+    if (/^(::1|fc00:|fd|fe80:)/i.test(host)) return true; // IPv6 private
+    return false;
+  } catch { return true; }
+}
+
 // ── Direct URL download (images from CDN) ─────
 async function downloadDirectUrl(url, title, res) {
+  if (isPrivateHost(url)) {
+    return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
+  }
   let responded = false;
   try {
     const imgRes = await httpGetFollowRedirects(url);

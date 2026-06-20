@@ -8,3 +8,6 @@ crash.log
 *.part
 *.txt
 _picker_tmp.ps1
+.env
+server/config.json
+code-review.md

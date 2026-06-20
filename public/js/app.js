@@ -1,6 +1,96 @@
 // ── Runtime constants ────────────────────────
 const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
+// ── Auth ──────────────────────────────────────
+const TOKEN_KEY = 'sns-dl-token';
+
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+
+function apiFetch(url, opts = {}) {
+  opts.headers = opts.headers || {};
+  const t = getToken();
+  if (t) opts.headers['x-token'] = t;
+  return fetch(url, opts);
+}
+
+async function initAuth() {
+  if (isLocal) return; // no auth on localhost
+
+  const stored = getToken();
+  const res = await fetch('/api/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: stored }),
+  });
+  const data = await res.json();
+
+  if (!data.authRequired) return; // server has no token set
+  if (data.ok) return;            // stored token is valid
+
+  // Show auth screen
+  await showAuthScreen();
+}
+
+function showAuthScreen() {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.id = 'authOverlay';
+    overlay.innerHTML = `
+      <div style="
+        position:fixed;inset:0;background:var(--bg);z-index:9999;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;
+        padding:32px;
+      ">
+        <div style="font-size:2rem;font-weight:900;color:var(--text)">SNS</div>
+        <div style="font-size:1rem;color:var(--text-sub)">Downloader</div>
+        <p style="color:var(--text-sub);font-size:.9rem;margin-top:8px">비밀번호를 입력하세요</p>
+        <div style="display:flex;gap:8px;width:100%;max-width:280px">
+          <input id="authInput" type="password" placeholder="비밀번호"
+            style="flex:1;padding:10px 14px;border-radius:var(--radius-sm);
+                   border:1px solid var(--border);background:var(--surface);
+                   color:var(--text);font-size:1rem;outline:none"/>
+          <button id="authBtn"
+            style="padding:10px 18px;border-radius:var(--radius-sm);border:none;
+                   background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer">
+            확인
+          </button>
+        </div>
+        <p id="authErr" style="color:var(--danger);font-size:.82rem;min-height:1.2em"></p>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const input = document.getElementById('authInput');
+    const btn   = document.getElementById('authBtn');
+    const err   = document.getElementById('authErr');
+    input.focus();
+
+    const tryAuth = async () => {
+      const token = input.value.trim();
+      if (!token) return;
+      btn.disabled = true;
+      const r = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        localStorage.setItem(TOKEN_KEY, token);
+        overlay.remove();
+        resolve();
+      } else {
+        err.textContent = d.error || '비밀번호가 올바르지 않습니다.';
+        input.value = '';
+        input.focus();
+        btn.disabled = false;
+      }
+    };
+
+    btn.addEventListener('click', tryAuth);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') tryAuth(); });
+  });
+}
+
 // ── Platform detection ──────────────────────
 const PLATFORMS = {
   youtube:   { regex: /youtube\.com|youtu\.be/,     label: 'YouTube',     icon: '▶' },
@@ -115,7 +205,7 @@ async function loadAndroidQR() {
 
   if (androidQrTab === 'wifi' && isLocal) {
     try {
-      const d = await (await fetch('/api/localip')).json();
+      const d = await (await apiFetch('/api/localip')).json();
       qrTarget = `http://${d.ip}:${d.port}`;
     } catch { qrTarget = 'http://localhost:3001'; }
   }
@@ -167,6 +257,9 @@ document.querySelectorAll('[data-theme-btn]').forEach(btn => {
     localStorage.setItem('sns-dl-theme', theme);
   });
 });
+
+// ── App init ─────────────────────────────────
+initAuth().catch(() => {}); // show auth screen before anything else (no-op on localhost)
 
 // ── Version ───────────────────────────────────
 fetch('/api/version').then(r => r.json()).then(d => {
@@ -323,7 +416,7 @@ fetchBtn.addEventListener('click', async () => {
   loading.style.display  = 'flex';
 
   try {
-    const res  = await fetch('/api/info', {
+    const res  = await apiFetch('/api/info', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
@@ -496,7 +589,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
     setProgress(0);
 
     try {
-      const res = await fetch('/api/download', {
+      const res = await apiFetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, itemUrl, format, title, mediaType }),
@@ -801,7 +894,7 @@ async function renderFiles() {
 
   let files;
   try {
-    const r = await fetch('/api/files');
+    const r = await apiFetch('/api/files');
     files = await r.json();
   } catch {
     container.innerHTML = `<div class="placeholder"><p>서버에 연결할 수 없습니다</p></div>`;
@@ -858,7 +951,7 @@ $('filesList').addEventListener('click', async e => {
   } else if (action === 'reveal') {
     await postFileAction('/api/files/reveal', filename);
   } else if (action === 'redownload') {
-    const r = await fetch(`/api/files/download/${encodeURIComponent(filename)}`);
+    const r = await apiFetch(`/api/files/download/${encodeURIComponent(filename)}`);
     if (!r.ok) { alert('재다운로드 실패'); return; }
     const blob = await r.blob();
     triggerDownload(blob, filename);
@@ -899,7 +992,7 @@ function refreshAppPickerUI() {
 
 async function pickApp(type) {
   try {
-    const r    = await fetch(`/api/settings/pick-app?type=${type}`);
+    const r    = await apiFetch(`/api/settings/pick-app?type=${type}`);
     const data = await r.json();
     if (data.path) {
       localStorage.setItem(type === 'video' ? 'videoPlayerPath' : 'imageViewerPath', data.path);
@@ -925,7 +1018,7 @@ refreshAppPickerUI();
 // ── Download folder settings ──────────────────
 async function refreshFolderUI() {
   try {
-    const d = await (await fetch('/api/settings/download-folder')).json();
+    const d = await (await apiFetch('/api/settings/download-folder')).json();
     const el = $('folderPath');
     if (el && d.path) el.textContent = d.path;
   } catch {}
@@ -935,13 +1028,13 @@ if (isLocal) {
   refreshFolderUI();
 
   $('folderPath')?.addEventListener('click', async () => {
-    try { await fetch('/api/settings/open-downloads-folder'); } catch {}
+    try { await apiFetch('/api/settings/open-downloads-folder'); } catch {}
   });
 
   $('changeFolderBtn')?.addEventListener('click', async () => {
     try {
       showToast('폴더 선택 창 열리는 중...');
-      const d = await (await fetch('/api/settings/pick-download-folder')).json();
+      const d = await (await apiFetch('/api/settings/pick-download-folder')).json();
       if (d.path) {
         const el = $('folderPath');
         if (el) el.textContent = d.path;
@@ -959,7 +1052,7 @@ if (isLocal) {
 // ── Cookies ───────────────────────────────────
 async function refreshCookiesUI() {
   try {
-    const d = await (await fetch('/api/settings/cookies')).json();
+    const d = await (await apiFetch('/api/settings/cookies')).json();
     const active = !!d.path;
 
     // Header dot
@@ -989,7 +1082,7 @@ async function refreshCookiesUI() {
 }
 
 async function uploadCookiesText(text) {
-  const r = await fetch('/api/settings/upload-cookies', {
+  const r = await apiFetch('/api/settings/upload-cookies', {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain' },
     body: text,
@@ -1013,7 +1106,7 @@ async function uploadCookiesFile(file) {
 async function pickCookiesNative() {
   try {
     showToast('파일 선택 창 열리는 중...');
-    const r = await fetch('/api/settings/pick-cookies-file');
+    const r = await apiFetch('/api/settings/pick-cookies-file');
     const d = await r.json();
     if (!d.content) return;
     await uploadCookiesText(d.content);
@@ -1129,7 +1222,7 @@ $('clearHistoryBtn').addEventListener('click', () => {
 
 $('clearFilesBtn').addEventListener('click', async () => {
   if (!confirm('downloads 폴더의 파일을 모두 삭제할까요?')) return;
-  await fetch('/api/files/clear', { method: 'POST' });
+  await apiFetch('/api/files/clear', { method: 'POST' });
   renderFiles();
 });
 
