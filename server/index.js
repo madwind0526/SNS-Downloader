@@ -257,9 +257,17 @@ app.post('/api/info', async (req, res) => {
     '--playlist-items', '1-10',
   ];
 
-  const runYtDlp = () => new Promise((resolve, reject) => {
-    execFile(YT_DLP, [...BASE_ARGS, ...cookiesArgs(), url], { timeout: 90000 },
-      (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve(stdout)
+  const runYtDlp = (withCookies = false) => new Promise((resolve, reject) => {
+    const args = [...BASE_ARGS, ...(withCookies ? cookiesArgs() : []), url];
+    execFile(YT_DLP, args,
+      { timeout: 90000, maxBuffer: 50 * 1024 * 1024 }, // 50MB — YouTube has many formats
+      (err, stdout, stderr) => {
+        if (err) {
+          console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
+          return reject(stderr || err.message);
+        }
+        resolve(stdout);
+      }
     );
   });
 
@@ -306,17 +314,17 @@ app.post('/api/info', async (req, res) => {
     t.includes('Login required') || t.includes('로그인');
 
   try {
-    // First attempt
+    // First attempt — no cookies (avoids format conflicts for public content)
     let stdout;
     try {
-      stdout = await runYtDlp();
+      stdout = await runYtDlp(false);
     } catch (errText) {
-      // Auto-retry: let yt-dlp extract browser cookies and try again
+      // Retry with cookies on login error
       if (isLoginError(errText)) {
-        console.log('[info] login required — trying browser cookies...');
+        console.log('[info] login required — retrying with cookies...');
         try {
           await extractCookiesViaBrowser();
-          stdout = await runYtDlp(); // second attempt with browser cookies
+          stdout = await runYtDlp(true); // second attempt with cookies
         } catch (retryErr) {
           const msg = typeof retryErr === 'string' ? retryErr : retryErr.message;
           return res.status(400).json({
