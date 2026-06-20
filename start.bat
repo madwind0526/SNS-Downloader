@@ -9,7 +9,7 @@ for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3001 " ^| findstr "L
 )
 timeout /t 1 /nobreak >nul
 
-:: Start server (visible window — close X to stop)
+:: Start server (visible window -- close X to stop)
 start "SNS Downloader Server" node server/index.js
 
 :: Wait until server is ready (poll /health every 500ms, up to 15 seconds)
