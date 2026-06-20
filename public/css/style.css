@@ -645,6 +645,43 @@ body {
   pointer-events: none;
 }
 
+/* Cookie header button */
+.cookie-icon-btn { position: relative; }
+.cookie-dot {
+  position: absolute;
+  top: 4px; right: 4px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-sub);
+  border: 1.5px solid var(--surface);
+  display: none;
+}
+.cookie-dot.active   { background: var(--success); display: block; }
+.cookie-dot.inactive { background: var(--danger);  display: block; }
+
+/* Cookie modal */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,.55);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.cookie-modal {
+  background: var(--surface);
+  border-radius: 20px 20px 0 0;
+  padding: 20px 20px 32px;
+  width: 100%; max-width: 480px;
+  display: flex; flex-direction: column; gap: 14px;
+  animation: slideUp .22s ease;
+}
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.cookie-modal-header { display: flex; flex-direction: column; gap: 8px; }
+.cookie-modal-title  { font-size: 1rem; font-weight: 700; }
+
 /* Cookies setup section */
 .cookies-status-row {
   display: flex;

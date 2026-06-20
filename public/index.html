@@ -89,7 +89,7 @@
         </div>
 
         <div class="settings-section" id="cookiesSection">
-          <p class="settings-label">Instagram 로그인 (쿠키 파일)</p>
+          <p class="settings-label">로그인 쿠키 (Instagram · YouTube · X 등)</p>
           <div id="cookiesStatus" class="cookies-status-row">
             <span id="cookiesStatusDot" class="cookies-dot inactive"></span>
             <span id="cookiesStatusText">미등록</span>
@@ -135,6 +135,34 @@
     </div>
   </div>
 
+  <!-- ── Cookie Modal ─────────────────────────────── -->
+  <div id="cookieModalOverlay" class="modal-overlay" style="display:none">
+    <div id="cookieModal" class="cookie-modal">
+      <div class="cookie-modal-header">
+        <p class="cookie-modal-title">쿠키 설정</p>
+        <div id="cookieModalStatus" class="cookies-status-row">
+          <span id="cookieModalDot" class="cookies-dot inactive"></span>
+          <span id="cookieModalStatusText">미등록</span>
+          <button class="text-btn" id="cookieModalClearBtn" style="display:none;margin-left:auto">삭제</button>
+        </div>
+      </div>
+      <div id="cookieModalDrop" class="cookies-drop-zone">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <p class="cookies-drop-text">cookies.txt 파일을 드래그하거나<br><label for="cookieModalFileInput" class="cookies-file-link">파일 선택</label></p>
+        <input type="file" id="cookieModalFileInput" accept=".txt" style="display:none">
+      </div>
+      <div class="cookies-guide">
+        <p class="cookies-guide-title">설정 방법 — YouTube · Instagram · TikTok · X 등 모두 지원</p>
+        <ol class="cookies-guide-steps">
+          <li>Chrome에서 <strong>Get cookies.txt LOCALLY</strong> 확장 설치</li>
+          <li>확장 아이콘 클릭 → <strong>Export All</strong> 선택 → cookies.txt 저장<br>
+            <span style="opacity:.65;font-size:.9em">(특정 사이트만 필요하면 해당 사이트 접속 후 Export)</span></li>
+          <li>위 영역에 파일 드롭 또는 파일 선택</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+
   <!-- ── App Shell ────────────────────────────────── -->
   <div class="app">
 
@@ -166,6 +194,13 @@
         </div>
       </div>
       <div class="header-actions">
+        <button class="icon-btn cookie-icon-btn" id="cookieHeaderBtn" title="쿠키 설정">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/>
+            <path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/>
+          </svg>
+          <span class="cookie-dot" id="cookieHeaderDot"></span>
+        </button>
         <button class="icon-btn" id="settingsBtn" title="설정">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
             <circle cx="12" cy="12" r="3"/>
