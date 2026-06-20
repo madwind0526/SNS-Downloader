@@ -204,6 +204,10 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// ── GET /api/version ─────────────────────────
+const { version } = require('../package.json');
+app.get('/api/version', (req, res) => res.json({ version }));
+
 // ── GET /api/localip ─────────────────────────
 // Returns the PC's LAN IP so Android (same Wi-Fi) can connect directly
 app.get('/api/localip', (req, res) => {
@@ -437,7 +441,9 @@ app.post('/api/download', (req, res) => {
     stream.pipe(res);
 
     stream.on('end', () => {
-      console.log('[download] stream complete — file kept in downloads/');
+      // Delete temp file after browser download completes
+      try { fs.unlinkSync(finalPath); } catch {}
+      console.log('[download] stream complete, temp file deleted');
     });
     stream.on('error', err => {
       console.error('[download] stream error:', err.message);

@@ -158,8 +158,13 @@ document.querySelectorAll('[data-theme-btn]').forEach(btn => {
   });
 });
 
+// ── Version ───────────────────────────────────
+fetch('/api/version').then(r => r.json()).then(d => {
+  const el = $('appVersion');
+  if (el) el.textContent = `v${d.version}`;
+}).catch(() => {});
+
 // ── Platform Landing ──────────────────────────
-const RENDER_URL = 'https://sns-downloader.onrender.com';
 const PLATFORM_KEY = 'sns-dl-platform';
 
 function showPlatformLanding() {
