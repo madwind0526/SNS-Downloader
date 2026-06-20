@@ -792,21 +792,37 @@ async function refreshCookiesUI() {
   } catch {}
 }
 
+async function uploadCookiesText(text) {
+  const r = await fetch('/api/settings/upload-cookies', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: text,
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error);
+  await refreshCookiesUI();
+  showToast(`쿠키 ${d.cookieCount}개 등록 완료`);
+  closeCookieModal();
+}
+
 async function uploadCookiesFile(file) {
-  const text = await file.text();
   try {
-    const r = await fetch('/api/settings/upload-cookies', {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: text,
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error);
-    await refreshCookiesUI();
-    showToast(`쿠키 ${d.cookieCount}개 등록 완료`);
-    closeCookieModal();
+    await uploadCookiesText(await file.text());
   } catch (e) {
     alert('쿠키 파일 등록 실패: ' + e.message);
+  }
+}
+
+// Windows native file picker (opens in user Downloads folder)
+async function pickCookiesNative() {
+  try {
+    showToast('파일 선택 창 열리는 중...');
+    const r = await fetch('/api/settings/pick-cookies-file');
+    const d = await r.json();
+    if (!d.content) return;
+    await uploadCookiesText(d.content);
+  } catch (e) {
+    alert('파일 선택 실패: ' + e.message);
   }
 }
 
@@ -815,6 +831,19 @@ function openCookieModal()  {
 }
 function closeCookieModal() {
   $('cookieModalOverlay').style.display = 'none';
+}
+
+// On Windows local: replace label file pickers with native picker
+if (isLocal && navigator.platform.includes('Win')) {
+  document.querySelectorAll('.cookies-file-link').forEach(label => {
+    label.removeAttribute('for');
+    label.addEventListener('click', e => {
+      e.stopPropagation();
+      pickCookiesNative();
+    });
+  });
+  $('cookieModalFileInput').style.display = 'none';
+  $('cookiesFileInput') && ($('cookiesFileInput').style.display = 'none');
 }
 
 // Header cookie button
@@ -836,7 +865,10 @@ if (modalDrop) {
     const file = e.dataTransfer.files[0];
     if (file) uploadCookiesFile(file);
   });
-  modalDrop.addEventListener('click', () => $('cookieModalFileInput')?.click());
+  modalDrop.addEventListener('click', e => {
+    if (e.target.closest('label')) return; // label already handles file input natively
+    $('cookieModalFileInput')?.click();
+  });
 }
 $('cookieModalFileInput')?.addEventListener('change', e => {
   const file = e.target.files[0];
@@ -858,7 +890,10 @@ if (settingsDrop) {
     const file = e.dataTransfer.files[0];
     if (file) uploadCookiesFile(file);
   });
-  settingsDrop.addEventListener('click', () => $('cookiesFileInput')?.click());
+  settingsDrop.addEventListener('click', e => {
+    if (e.target.closest('label')) return;
+    $('cookiesFileInput')?.click();
+  });
 }
 $('cookiesFileInput')?.addEventListener('change', e => {
   const file = e.target.files[0];

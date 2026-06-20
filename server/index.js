@@ -514,6 +514,28 @@ app.get('/api/settings/cookies', (req, res) => {
   res.json({ path: c.cookiesPath || null });
 });
 
+// ── GET /api/settings/pick-cookies-file ──────
+// Opens Windows file picker starting in user's Downloads folder
+app.get('/api/settings/pick-cookies-file', (req, res) => {
+  if (process.platform !== 'win32') return res.json({ content: null });
+  const downloadsDir = path.join(os.homedir(), 'Downloads');
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$d = New-Object System.Windows.Forms.OpenFileDialog',
+    `$d.InitialDirectory = "${downloadsDir.replace(/\\/g, '\\\\')}"`,
+    '$d.Title = "쿠키 파일 선택 (cookies.txt)"',
+    '$d.Filter = "cookies.txt|cookies.txt|텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*"',
+    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Get-Content $d.FileName -Raw }',
+  ].join('\n');
+  const tmpPs1 = path.join(DOWNLOADS_DIR, `_picker_${Date.now()}.ps1`);
+  try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch { return res.json({ content: null }); }
+  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout) => {
+    try { fs.unlinkSync(tmpPs1); } catch {}
+    const content = (stdout || '').trim();
+    res.json({ content: content || null });
+  });
+});
+
 // ── POST /api/settings/upload-cookies ────────
 // Receive cookies.txt content (text/plain or JSON {content}) and save to disk
 app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '10mb' }), (req, res) => {
