@@ -609,10 +609,25 @@ app.get('/api/files/download/:filename', (req, res) => {
   const ext      = path.extname(fp).slice(1);
   const fileSize = fs.statSync(fp).size;
   const deleteAfter = req.query.delete === '1' && process.platform !== 'win32';
+  const filename = path.basename(fp);
+  const disposition = req.query.preview === '1' ? 'inline' : 'attachment';
   res.setHeader('Content-Type', getMimeType(ext));
   res.setHeader('Content-Length', fileSize);
-  res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(fp))}`);
-  res.setHeader('X-Filename', encodeURIComponent(path.basename(fp)));
+  res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.setHeader('X-Filename', encodeURIComponent(filename));
+  res.setHeader('Accept-Ranges', 'bytes');
+  const range = req.headers.range;
+  const match = range?.match(/bytes=(\d*)-(\d*)/);
+  if (match) {
+    const start = match[1] ? parseInt(match[1], 10) : 0;
+    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+    if (start <= end && end < fileSize) {
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
+      res.setHeader('Content-Length', end - start + 1);
+      return fs.createReadStream(fp, { start, end }).pipe(res);
+    }
+  }
   const stream = fs.createReadStream(fp);
   stream.pipe(res);
   stream.on('end', () => {

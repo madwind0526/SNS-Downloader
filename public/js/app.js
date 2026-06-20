@@ -699,7 +699,7 @@ downloadSelectedBtn.addEventListener('click', async () => {
         const data = await res.json();
         filename = data.filename;
         if (data.downloadUrl) {
-          serverDownloads.push({ url: data.downloadUrl, filename });
+          serverDownloads.push({ url: data.downloadUrl, filename, mediaType });
           sessionFiles.push(filename);
           triggerServerDownload(data.downloadUrl, filename);
           showToast('폰 다운로드를 시작했습니다');
@@ -780,6 +780,16 @@ function showSuccess(count, blob, pcFile, serverDownloads = []) {
   } else if (blob?.type.startsWith('video/') || blob?.type.startsWith('audio/')) {
     previewVideo.src           = URL.createObjectURL(blob);
     previewVideo.style.display = 'block';
+  } else if (serverDownloads.length) {
+    const first = serverDownloads[serverDownloads.length - 1];
+    const previewUrl = withServerParams(first.url, { preview: '1' });
+    if (first.mediaType === 'image') {
+      previewImage.src = previewUrl;
+      previewImage.style.display = 'block';
+    } else {
+      previewVideo.src = previewUrl;
+      previewVideo.style.display = 'block';
+    }
   } else if (pcFile) {
     // PC: preview from server endpoint
     const previewUrl = `/api/files/download/${encodeURIComponent(pcFile.filename)}`;
@@ -844,6 +854,12 @@ function withAuthToken(url) {
   if (!token) return url;
   const u = new URL(url, window.location.origin);
   u.searchParams.set('token', token);
+  return u.pathname + u.search + u.hash;
+}
+
+function withServerParams(url, params = {}) {
+  const u = new URL(withAuthToken(url), window.location.origin);
+  Object.entries(params).forEach(([key, value]) => u.searchParams.set(key, value));
   return u.pathname + u.search + u.hash;
 }
 
