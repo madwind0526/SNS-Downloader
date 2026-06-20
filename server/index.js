@@ -260,7 +260,7 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 
 // ── GET /api/version ─────────────────────────
 const { version } = require('../package.json');
-app.get('/api/version', (req, res) => res.json({ version }));
+app.get('/api/version', (req, res) => res.json({ version, platform: process.platform }));
 
 // ── POST /api/auth ────────────────────────────
 // Validates access token. Returns authRequired flag so client knows whether to show auth screen.
@@ -442,8 +442,9 @@ app.post('/api/info', async (req, res) => {
 });
 
 // ── POST /api/download ───────────────────────
-// PC/Windows: saves permanently to downloads folder, returns JSON (no browser download)
-// Render/Linux: saves temp, streams to browser, deletes after
+// localhost:  saves permanently to downloads folder, returns JSON (no browser download)
+// WiFi phone: saves permanently to downloads folder, streams to phone browser (keep file)
+// Render:     saves temp, streams to browser, deletes after
 app.post('/api/download', (req, res) => {
   const { url, format, title, itemUrl } = req.body;
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
@@ -455,9 +456,13 @@ app.post('/api/download', (req, res) => {
 
   console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title} active=${activeDownloads + 1}`);
 
+  // Detect if request came from the local PC browser (vs WiFi phone or Render)
+  const clientIp = req.ip || req.socket?.remoteAddress || '';
+  const isLocalhostReq = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(clientIp);
+
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
-    return downloadDirectUrl(downloadUrl, title, res);
+    return downloadDirectUrl(downloadUrl, title, res, isLocalhostReq);
   }
 
   const sessionId = crypto.randomBytes(8).toString('hex');
@@ -539,14 +544,17 @@ app.post('/api/download', (req, res) => {
     const fileSize  = fs.statSync(finalPath).size;
     const mimeType  = getMimeType(ext);
 
-    if (process.platform === 'win32') {
-      // PC local: file is permanently saved — return metadata only, no browser download
+    if (isLocalhostReq) {
+      // Local PC browser: file saved permanently, return metadata only
       console.log(`[download] saved ${finalFile} (${fileSize} bytes) → ${finalPath}`);
       return res.json({ ok: true, filename: finalFile, path: finalPath, size: fileSize });
     }
 
-    // Render/remote: stream to browser then delete
-    console.log(`[download] streaming ${finalFile} (${fileSize} bytes)`);
+    // WiFi phone or Render: stream file to browser
+    // Windows (WiFi): keep file on PC after streaming
+    // Linux (Render): delete temp file after streaming
+    const keepFile = process.platform === 'win32';
+    console.log(`[download] streaming ${finalFile} (${fileSize} bytes) keepFile=${keepFile}`);
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Length', fileSize);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(finalFile)}`);
@@ -557,8 +565,8 @@ app.post('/api/download', (req, res) => {
     stream.pipe(res);
 
     stream.on('end', () => {
-      try { fs.unlinkSync(finalPath); } catch {}
-      console.log('[download] stream complete, temp deleted');
+      if (!keepFile) { try { fs.unlinkSync(finalPath); } catch {} }
+      console.log(`[download] stream complete${keepFile ? ', file kept on PC' : ', temp deleted'}`);
     });
     stream.on('error', err => {
       console.error('[download] stream error:', err.message);
@@ -919,7 +927,7 @@ function isPrivateHost(urlStr) {
 }
 
 // ── Direct URL download (images from CDN) ─────
-async function downloadDirectUrl(url, title, res) {
+async function downloadDirectUrl(url, title, res, isLocalhostReq = false) {
   if (isPrivateHost(url)) {
     return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
   }
@@ -954,12 +962,13 @@ async function downloadDirectUrl(url, title, res) {
     console.log(`[download-direct] saved ${finalName} (${fileSize} bytes)`);
     responded = true;
 
-    if (process.platform === 'win32') {
-      // PC local: file saved permanently — return metadata only
+    if (isLocalhostReq) {
+      // Local PC browser: file saved permanently — return metadata only
       return res.json({ ok: true, filename: finalName, path: finalPath, size: fileSize });
     }
 
-    // Render/remote: stream then delete
+    // WiFi phone or Render: stream to browser
+    const keepFile = process.platform === 'win32';
     res.setHeader('Content-Type', mimeType);
     res.setHeader('Content-Length', fileSize);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(finalName)}`);
@@ -968,7 +977,7 @@ async function downloadDirectUrl(url, title, res) {
 
     const readStream = fs.createReadStream(finalPath);
     readStream.pipe(res);
-    readStream.on('end', () => { try { fs.unlinkSync(finalPath); } catch {} });
+    readStream.on('end', () => { if (!keepFile) { try { fs.unlinkSync(finalPath); } catch {} } });
     readStream.on('error', err => {
       console.error('[download-direct] stream error:', err.message);
     });

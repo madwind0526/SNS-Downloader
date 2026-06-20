@@ -1,5 +1,7 @@
 // ── Runtime constants ────────────────────────
 const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+// True when the server is a Windows PC (localhost OR WiFi LAN) — set after /api/version fetch
+let isPCServer = isLocal;
 
 // ── Auth ──────────────────────────────────────
 const TOKEN_KEY = 'sns-dl-token';
@@ -273,6 +275,10 @@ fetch('/api/version').then(r => r.json()).then(d => {
   const pl = $('plVersion');
   if (el) el.textContent = v;
   if (pl) pl.textContent = v;
+  if (d.platform === 'win32') {
+    isPCServer = true;
+    if (!isLocal) setupPCServerUI(); // WiFi: enable PC folder UI
+  }
 }).catch(() => {});
 
 // ── Connection mode badge ─────────────────────
@@ -292,7 +298,7 @@ function hidePlatformLanding() {
 }
 
 $('platformPC')?.addEventListener('click', () => {
-  const w = window.innerWidth, h = window.innerHeight;
+  const w = 420, h = 820;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -304,7 +310,7 @@ $('platformPC')?.addEventListener('click', () => {
 });
 
 $('platformAndroid')?.addEventListener('click', () => {
-  const w = window.innerWidth, h = window.innerHeight;
+  const w = 420, h = 820;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -915,8 +921,8 @@ async function listMobileDir(container, dirHandle) {
 async function renderFiles() {
   const container = $('filesList');
 
-  // Mobile (Render): files live on device — open folder picker via File System Access API
-  if (!isLocal) {
+  // Render server: files live on device — open folder picker via File System Access API
+  if (!isPCServer) {
     showMobileFilesUI(container);
     return;
   }
@@ -1055,27 +1061,42 @@ async function refreshFolderUI() {
   } catch {}
 }
 
-if (isLocal) {
+function setupPCServerUI() {
+  const sec = $('folderSection');
+  if (sec) sec.style.display = '';
   refreshFolderUI();
 
-  $('folderPath')?.addEventListener('click', async () => {
-    try { await apiFetch('/api/settings/open-downloads-folder'); } catch {}
-  });
-
-  $('changeFolderBtn')?.addEventListener('click', async () => {
-    try {
-      showToast('폴더 선택 창 열리는 중...');
-      const d = await (await apiFetch('/api/settings/pick-download-folder')).json();
-      if (d.path) {
-        const el = $('folderPath');
-        if (el) el.textContent = d.path;
-        showToast('다운로드 폴더 변경됨');
+  // Avoid duplicate listeners (WiFi: called after version fetch, localhost: called immediately)
+  const fp  = $('folderPath');
+  const cfb = $('changeFolderBtn');
+  if (fp && !fp._pcSetup) {
+    fp._pcSetup = true;
+    fp.addEventListener('click', async () => {
+      try { await apiFetch('/api/settings/open-downloads-folder'); } catch {}
+    });
+  }
+  if (cfb && !cfb._pcSetup) {
+    cfb._pcSetup = true;
+    cfb.addEventListener('click', async () => {
+      try {
+        showToast('폴더 선택 창 열리는 중...');
+        const d = await (await apiFetch('/api/settings/pick-download-folder')).json();
+        if (d.path) {
+          const el = $('folderPath');
+          if (el) el.textContent = d.path;
+          showToast('다운로드 폴더 변경됨');
+        }
+      } catch (e) {
+        alert('폴더 선택 실패: ' + e.message);
       }
-    } catch (e) {
-      alert('폴더 선택 실패: ' + e.message);
-    }
-  });
+    });
+  }
+}
+
+if (isLocal) {
+  setupPCServerUI();
 } else {
+  // Hide folder section initially; shown again if server turns out to be a Windows PC
   const sec = $('folderSection');
   if (sec) sec.style.display = 'none';
 }

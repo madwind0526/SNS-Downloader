@@ -2,14 +2,17 @@
 cd /d "%~dp0"
 if not exist node_modules npm install
 
-:: Check if server is already running and responsive (not just port open)
-powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'http://localhost:3001/health' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-if not errorlevel 1 goto :open
+:: Kill any existing process on port 3001
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3001 " ^| findstr "LISTENING"') do (
+  echo Stopping existing server (PID %%a)...
+  taskkill /PID %%a /F >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
 
-:: Server not ready — start it
+:: Start server (visible window — close X to stop)
 start "SNS Downloader Server" node server/index.js
 
-:: Poll /health every 500ms until server responds (up to 15 seconds)
+:: Wait until server is ready (poll /health every 500ms, up to 15 seconds)
 powershell -NoProfile -Command "for ($i=0; $i -lt 30; $i++) { try { Invoke-WebRequest -Uri 'http://localhost:3001/health' -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop | Out-Null; break } catch {} ; Start-Sleep -Milliseconds 500 }"
 
 :open
