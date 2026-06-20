@@ -103,8 +103,15 @@ body {
 .title-sub {
   font-size: 0.762rem;  /* ~16px @ ref */
   font-weight: 500;
-  color: var(--text-sub);
+  color: var(--text);
   letter-spacing: 0.3px;
+}
+
+#appVersion {
+  color: inherit;
+  font-size: 1em;
+  font-weight: inherit;
+  opacity: 1;
 }
 
 .header-status {
@@ -703,9 +710,10 @@ body {
   letter-spacing: 4px; line-height: 1;
 }
 .pl-logo-sub {
-  font-size: 1rem; font-weight: 500; color: var(--text-sub);
+  font-size: 1rem; font-weight: 500; color: var(--text);
   margin-top: 8px; letter-spacing: 0.3px;
 }
+#plVersion { color: inherit; font-weight: inherit; opacity: 1; }
 .pl-select-label {
   font-size: 0.82rem; color: var(--text-sub);
   letter-spacing: 0.6px; margin-bottom: 22px;
