@@ -35,46 +35,154 @@ function cookiesArgs() {
 }
 
 // ── Browser cookie extraction via yt-dlp ─────────────────────────
-// yt-dlp handles its own DPAPI decryption. We try each browser in order.
-// If the browser is currently running, its SQLite DB is locked and yt-dlp fails.
-// In that case we surface a clear "close browser and retry" message.
-const BROWSERS = ['chrome', 'edge', 'firefox', 'chromium', 'brave'];
+// Strategy:
+//   1. Try --cookies-from-browser directly (works if browser is closed)
+//   2. If SQLite is locked (browser running), use robocopy /B backup mode
+//      to copy Cookies + Local State into a temp dir with proper structure,
+//      then pass that dir to yt-dlp which handles DPAPI decryption itself.
+//   3. If all fail, surface a clear error.
+
+const localAppData = process.env.LOCALAPPDATA
+  || path.join(os.homedir(), 'AppData', 'Local');
+
+const CHROMIUM_BROWSERS = [
+  { name: 'chrome', userDataDir: path.join(localAppData, 'Google',    'Chrome',  'User Data') },
+  { name: 'edge',   userDataDir: path.join(localAppData, 'Microsoft', 'Edge',    'User Data') },
+];
+const OTHER_BROWSERS = ['firefox', 'chromium', 'brave'];
+
+// Find the last-used profile name from Chrome/Edge Local State JSON
+function findLastProfile(userDataDir) {
+  try {
+    const raw  = fs.readFileSync(path.join(userDataDir, 'Local State'), 'utf8');
+    const last = JSON.parse(raw)?.profile?.last_used;
+    if (last && fs.existsSync(path.join(userDataDir, last))) return last;
+  } catch {}
+  return 'Default';
+}
+
+// Try yt-dlp direct browser access (works when browser is closed)
+function tryBrowserDirect(browser) {
+  return new Promise((resolve, reject) => {
+    execFile(YT_DLP,
+      ['--cookies-from-browser', browser, '--skip-download',
+       '--quiet', '--no-warnings', 'https://www.instagram.com/'],
+      { timeout: 20000 },
+      (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve()
+    );
+  });
+}
+
+// Robocopy /B copies locked SQLite files + Local State → proper temp structure
+// yt-dlp's profile arg: <name>:<profilePath> → looks for Local State one level up
+async function tryBrowserWithCopy({ name, userDataDir }) {
+  if (!fs.existsSync(userDataDir)) {
+    console.log(`[cookies] ${name}: userDataDir not found: ${userDataDir}`);
+    return false;
+  }
+
+  const profileName = findLastProfile(userDataDir);
+  const profileSrc  = path.join(userDataDir, profileName);
+  const localState  = path.join(userDataDir, 'Local State');
+
+  if (!fs.existsSync(profileSrc)) {
+    console.log(`[cookies] ${name}: profile dir not found: ${profileSrc}`);
+    return false;
+  }
+
+  const tmpDir     = path.join(DOWNLOADS_DIR, `_ck_${Date.now()}`);
+  const tmpProfile = path.join(tmpDir, profileName);
+  fs.mkdirSync(tmpProfile, { recursive: true });
+
+  try {
+    // Local State is not SQLite-locked — copy normally
+    if (fs.existsSync(localState)) {
+      fs.copyFileSync(localState, path.join(tmpDir, 'Local State'));
+    }
+
+    // Cookies SQLite is locked while browser runs — robocopy /B bypasses the lock
+    execSync(
+      `robocopy "${profileSrc}" "${tmpProfile}" Cookies Cookies-wal Cookies-shm /B /r:0 /w:0 /NFL /NDL /NJH /NJS /NC /NS`,
+      { timeout: 10000 }
+    );
+
+    if (!fs.existsSync(path.join(tmpProfile, 'Cookies'))) {
+      console.log(`[cookies] ${name}: robocopy produced no Cookies file`);
+      return false;
+    }
+
+    console.log(`[cookies] ${name}: copied ${profileName}/Cookies + Local State → ${tmpDir}`);
+
+    // yt-dlp reads profile dir, finds Local State one level up, does DPAPI itself
+    await new Promise((resolve, reject) => {
+      execFile(YT_DLP,
+        ['--cookies-from-browser', `${name}:${tmpProfile}`,
+         '--skip-download', '--quiet', '--no-warnings',
+         'https://www.instagram.com/'],
+        { timeout: 25000, env: { ...process.env } },
+        (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve()
+      );
+    });
+
+    const c = loadConfig();
+    c.cookiesBrowser = name;
+    delete c.cookiesPath;
+    saveConfig(c);
+    console.log(`[cookies] ${name}: robocopy+copy strategy succeeded`);
+    return true;
+  } catch (e) {
+    console.log(`[cookies] ${name} copy strategy failed: ${String(e).split('\n')[0]}`);
+    return false;
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
 
 async function extractCookiesViaBrowser() {
-  let lockedBrowser = null;
-
-  for (const browser of BROWSERS) {
+  // Phase 1: direct access for each Chromium browser (succeeds if browser is closed)
+  for (const b of CHROMIUM_BROWSERS) {
     try {
-      await new Promise((resolve, reject) => {
-        execFile(YT_DLP,
-          ['--cookies-from-browser', browser, '--skip-download',
-           '--quiet', '--no-warnings', 'https://www.instagram.com/'],
-          { timeout: 20000 },
-          (err, stdout, stderr) => err ? reject(stderr || err.message) : resolve()
-        );
-      });
-      console.log(`[cookies] using browser: ${browser}`);
+      await tryBrowserDirect(b.name);
+      const c = loadConfig();
+      c.cookiesBrowser = b.name;
+      delete c.cookiesPath;
+      saveConfig(c);
+      console.log(`[cookies] direct: ${b.name}`);
+      return b.name;
+    } catch (e) {
+      console.log(`[cookies] direct ${b.name}: ${String(e).split('\n')[0]}`);
+    }
+  }
+
+  // Phase 2: robocopy bypass for Chromium browsers (works while browser is running)
+  for (const b of CHROMIUM_BROWSERS) {
+    if (await tryBrowserWithCopy(b)) return b.name;
+  }
+
+  // Phase 3: other browsers (Firefox, Brave, Chromium) — usually not locked
+  for (const browser of OTHER_BROWSERS) {
+    try {
+      await tryBrowserDirect(browser);
       const c = loadConfig();
       c.cookiesBrowser = browser;
       delete c.cookiesPath;
       saveConfig(c);
+      console.log(`[cookies] direct: ${browser}`);
       return browser;
     } catch (e) {
-      const msg = String(e);
-      if (msg.includes('Could not copy') && !lockedBrowser) lockedBrowser = browser;
-      console.log(`[cookies] ${browser}: ${msg.split('\n')[0]}`);
+      console.log(`[cookies] ${browser}: ${String(e).split('\n')[0]}`);
     }
   }
 
-  if (lockedBrowser) {
-    // Browser is running but SQLite is locked — ask user to close it briefly
-    throw Object.assign(
-      new Error(`${lockedBrowser} 쿠키를 읽으려면 브라우저를 잠시 닫아야 합니다.\n${lockedBrowser}을 닫은 후 [재시도]를 눌러주세요.`),
-      { needClose: true, browser: lockedBrowser }
-    );
-  }
-
-  throw new Error('브라우저에서 Instagram 로그인을 찾을 수 없습니다.\n브라우저에서 instagram.com에 로그인 후 다시 시도해주세요.');
+  // All browsers failed — check if ABE (App-Bound Encryption) is the cause
+  throw Object.assign(
+    new Error(
+      'Instagram 로그인이 필요합니다.\n' +
+      'Chrome 보안 정책(App-Bound Encryption)으로 인해 자동 로그인이 불가합니다.\n' +
+      '설정에서 쿠키 파일을 등록해주세요.'
+    ),
+    { needSetup: true }
+  );
 }
 
 const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
@@ -205,6 +313,7 @@ app.post('/api/info', async (req, res) => {
           return res.status(400).json({
             error: msg,
             needClose: retryErr.needClose || false,
+            needSetup: retryErr.needSetup || false,
             browser: retryErr.browser || null,
           });
         }
@@ -403,6 +512,27 @@ app.get('/api/settings/pick-app', (req, res) => {
 app.get('/api/settings/cookies', (req, res) => {
   const c = loadConfig();
   res.json({ path: c.cookiesPath || null });
+});
+
+// ── POST /api/settings/upload-cookies ────────
+// Receive cookies.txt content (text/plain or JSON {content}) and save to disk
+app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '10mb' }), (req, res) => {
+  let content = typeof req.body === 'string' ? req.body : (req.body?.content || '');
+  if (!content.includes('# Netscape HTTP Cookie File') && !content.includes('\t')) {
+    return res.status(400).json({ error: '유효한 cookies.txt 파일이 아닙니다.\n"Get cookies.txt LOCALLY" 확장 프로그램으로 내보낸 파일을 사용하세요.' });
+  }
+  const savePath = path.join(__dirname, 'cookies.txt');
+  try {
+    fs.writeFileSync(savePath, content, 'utf8');
+    const c = loadConfig();
+    c.cookiesPath = savePath;
+    delete c.cookiesBrowser;
+    saveConfig(c);
+    const lineCount = content.split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
+    res.json({ ok: true, path: savePath, cookieCount: lineCount });
+  } catch (e) {
+    res.status(500).json({ error: '파일 저장 실패: ' + e.message });
+  }
 });
 
 // ── POST /api/settings/auto-cookies ──────────

@@ -265,7 +265,9 @@ fetchBtn.addEventListener('click', async () => {
       loading.style.display = 'none';
       fetchBtn.style.display = 'block';
       // Special case: browser is running and SQLite is locked
-      if (data.needClose) {
+      if (data.needSetup) {
+        showErrorWithSetup(data.error);
+      } else if (data.needClose) {
         showErrorWithRetry(data.error);
       } else {
         showError(data.error || '알 수 없는 오류');
@@ -531,6 +533,14 @@ function showError(msg) {
   errorBox.style.display = 'flex';
 }
 
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--surface2);color:var(--text);padding:10px 18px;border-radius:20px;font-size:0.85rem;z-index:9999;white-space:nowrap;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2500);
+}
+
 function showErrorWithRetry(msg) {
   resetResults();
   errorMsg.innerHTML = `${escHtml(msg)}<br><br>
@@ -541,6 +551,22 @@ function showErrorWithRetry(msg) {
   $('retryAfterClose')?.addEventListener('click', () => {
     errorBox.style.display = 'none';
     fetchBtn.click();
+  });
+}
+
+function showErrorWithSetup(msg) {
+  resetResults();
+  errorMsg.innerHTML = `${escHtml(msg)}<br><br>
+    <button id="goToSettings" style="margin-top:8px;padding:8px 18px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.9rem">
+      쿠키 설정하기
+    </button>`;
+  errorBox.style.display = 'flex';
+  $('goToSettings')?.addEventListener('click', () => {
+    errorBox.style.display = 'none';
+    // Switch to info/settings tab
+    document.querySelector('.nav-btn[data-page="pageInfo"]')?.click();
+    // Scroll to cookies section
+    setTimeout(() => $('cookiesSection')?.scrollIntoView({ behavior: 'smooth' }), 300);
   });
 }
 
@@ -739,31 +765,68 @@ refreshAppPickerUI();
 
 // ── Cookies settings ─────────────────────────
 async function refreshCookiesUI() {
-  const display = $('cookiesDisplay');
-  if (!display) return;
+  const dot  = $('cookiesStatusDot');
+  const text = $('cookiesStatusText');
+  const clrBtn = $('cookiesClearBtn');
+  const dropZone = $('cookiesDropZone');
+  if (!dot) return;
   try {
     const d = await (await fetch('/api/settings/cookies')).json();
-    display.textContent = d.path ? '쿠키 설정됨 ✓' : '미설정 (다운로드 시 자동 추출)';
+    if (d.path) {
+      dot.className = 'cookies-dot active';
+      text.textContent = '쿠키 등록됨 — Instagram 자동 로그인';
+      if (clrBtn) clrBtn.style.display = '';
+      if (dropZone) dropZone.style.display = 'none';
+    } else {
+      dot.className = 'cookies-dot inactive';
+      text.textContent = '미등록';
+      if (clrBtn) clrBtn.style.display = 'none';
+      if (dropZone) dropZone.style.display = '';
+    }
   } catch {
-    display.textContent = '상태 확인 불가';
+    text.textContent = '상태 확인 불가';
   }
 }
 
-$('syncCookiesBtn')?.addEventListener('click', async () => {
-  const btn = $('syncCookiesBtn');
-  const display = $('cookiesDisplay');
-  btn.disabled = true;
-  btn.textContent = '추출 중...';
-  display.textContent = 'Chrome 쿠키 읽는 중...';
+async function uploadCookiesFile(file) {
+  const text = await file.text();
   try {
-    const d = await (await fetch('/api/settings/auto-cookies', { method: 'POST' })).json();
-    display.textContent = d.ok ? `쿠키 ${d.count}개 동기화됨 ✓` : (d.error || '실패');
-  } catch {
-    display.textContent = '오류 발생';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '지금 동기화';
+    const r = await fetch('/api/settings/upload-cookies', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: text,
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error);
+    await refreshCookiesUI();
+    showToast(`쿠키 ${d.cookieCount}개 등록 완료`);
+  } catch (e) {
+    alert('쿠키 파일 등록 실패: ' + e.message);
   }
+}
+
+// Drag-and-drop on the drop zone
+const dropZone = $('cookiesDropZone');
+if (dropZone) {
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) uploadCookiesFile(file);
+  });
+  dropZone.addEventListener('click', () => $('cookiesFileInput')?.click());
+}
+
+$('cookiesFileInput')?.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) uploadCookiesFile(file);
+});
+
+$('cookiesClearBtn')?.addEventListener('click', async () => {
+  await fetch('/api/settings/cookies', { method: 'DELETE' });
+  refreshCookiesUI();
 });
 
 // Hide cookies section when not running locally

@@ -89,14 +89,27 @@
         </div>
 
         <div class="settings-section" id="cookiesSection">
-          <p class="settings-label">브라우저 쿠키 (로그인 필요 영상)</p>
-          <div class="app-picker-row">
-            <span class="app-picker-path" id="cookiesDisplay">확인 중...</span>
-            <button class="text-btn" id="syncCookiesBtn">지금 동기화</button>
+          <p class="settings-label">Instagram 로그인 (쿠키 파일)</p>
+          <div id="cookiesStatus" class="cookies-status-row">
+            <span id="cookiesStatusDot" class="cookies-dot inactive"></span>
+            <span id="cookiesStatusText">미등록</span>
+            <button class="text-btn" id="cookiesClearBtn" style="display:none;margin-left:auto">삭제</button>
           </div>
-          <p style="font-size:0.75rem;color:var(--text-muted);margin-top:6px;line-height:1.5">
-            Chrome에서 Instagram 로그인 상태이면 자동으로 사용됩니다.
-          </p>
+          <!-- Drop zone -->
+          <div id="cookiesDropZone" class="cookies-drop-zone">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <p class="cookies-drop-text">cookies.txt 파일을 여기에 드래그하거나<br><label for="cookiesFileInput" class="cookies-file-link">파일 선택</label></p>
+            <input type="file" id="cookiesFileInput" accept=".txt" style="display:none">
+          </div>
+          <div class="cookies-guide">
+            <p class="cookies-guide-title">설정 방법 (1회만)</p>
+            <ol class="cookies-guide-steps">
+              <li>Chrome에서 <strong>Get cookies.txt LOCALLY</strong> 확장 설치</li>
+              <li><strong>instagram.com</strong> 접속 (로그인 상태)</li>
+              <li>확장 아이콘 클릭 → <strong>Export As</strong> → <strong>cookies.txt</strong> 저장</li>
+              <li>위 드래그 영역에 파일 드롭 또는 파일 선택</li>
+            </ol>
+          </div>
         </div>
 
         <div class="settings-section" id="androidConnectSection">
