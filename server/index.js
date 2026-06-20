@@ -90,7 +90,7 @@ async function tryBrowserWithCopy({ name, userDataDir }) {
     return false;
   }
 
-  const tmpDir     = path.join(DOWNLOADS_DIR, `_ck_${Date.now()}`);
+  const tmpDir     = path.join(getDownloadsDir(), `_ck_${Date.now()}`);
   const tmpProfile = path.join(tmpDir, profileName);
   fs.mkdirSync(tmpProfile, { recursive: true });
 
@@ -185,8 +185,13 @@ async function extractCookiesViaBrowser() {
   );
 }
 
-const DOWNLOADS_DIR = path.join(__dirname, '..', 'downloads');
-if (!fs.existsSync(DOWNLOADS_DIR)) fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
+function getDownloadsDir() {
+  const c = loadConfig();
+  const d = c.downloadsDir || path.join(__dirname, '..', 'downloads');
+  if (!fs.existsSync(d)) try { fs.mkdirSync(d, { recursive: true }); } catch {}
+  return d;
+}
+getDownloadsDir(); // ensure default dir exists on startup
 
 // Keep server alive — log unhandled errors instead of crashing
 process.on('uncaughtException', err => {
@@ -357,7 +362,7 @@ app.post('/api/download', (req, res) => {
   }
 
   const sessionId = crypto.randomBytes(8).toString('hex');
-  const outTemplate = path.join(DOWNLOADS_DIR, `${sessionId}.%(ext)s`);
+  const outTemplate = path.join(getDownloadsDir(), `${sessionId}.%(ext)s`);
 
   const isAudioOnly = (format || '').startsWith('bestaudio');
   const isImage     = req.body.mediaType === 'image';
@@ -400,7 +405,7 @@ app.post('/api/download', (req, res) => {
     // Find the output file — exclude .part files (yt-dlp temp)
     let files;
     try {
-      files = fs.readdirSync(DOWNLOADS_DIR)
+      files = fs.readdirSync(getDownloadsDir())
         .filter(f => f.startsWith(sessionId) && !f.endsWith('.part'));
     } catch (e) {
       console.error('[download] readdirSync failed:', e.message);
@@ -418,11 +423,11 @@ app.post('/api/download', (req, res) => {
     // Ensure unique filename
     let finalName  = `${baseName}.${ext}`;
     let counter    = 1;
-    while (fs.existsSync(path.join(DOWNLOADS_DIR, finalName))) {
+    while (fs.existsSync(path.join(getDownloadsDir(), finalName))) {
       finalName = `${baseName} (${counter++}).${ext}`;
     }
-    const srcPath  = path.join(DOWNLOADS_DIR, files[0]);
-    const dstPath  = path.join(DOWNLOADS_DIR, finalName);
+    const srcPath  = path.join(getDownloadsDir(), files[0]);
+    const dstPath  = path.join(getDownloadsDir(), finalName);
     try { fs.renameSync(srcPath, dstPath); } catch { /* keep original name */ }
     const finalPath = fs.existsSync(dstPath) ? dstPath : srcPath;
     const finalFile = path.basename(finalPath);
@@ -441,9 +446,11 @@ app.post('/api/download', (req, res) => {
     stream.pipe(res);
 
     stream.on('end', () => {
-      // Delete temp file after browser download completes
-      try { fs.unlinkSync(finalPath); } catch {}
-      console.log('[download] stream complete, temp file deleted');
+      // On Render/Linux: free disk space after streaming. On local Windows: keep file in downloads folder.
+      if (process.platform !== 'win32') {
+        try { fs.unlinkSync(finalPath); } catch {}
+      }
+      console.log('[download] stream complete');
     });
     stream.on('error', err => {
       console.error('[download] stream error:', err.message);
@@ -474,10 +481,10 @@ app.get('/api/files/download/:filename', (req, res) => {
 // List files in downloads/ sorted by newest first
 app.get('/api/files', (req, res) => {
   try {
-    const files = fs.readdirSync(DOWNLOADS_DIR)
+    const files = fs.readdirSync(getDownloadsDir())
       .filter(f => !f.endsWith('.part') && !f.startsWith('.'))
       .map(f => {
-        const fp   = path.join(DOWNLOADS_DIR, f);
+        const fp   = path.join(getDownloadsDir(), f);
         const stat = fs.statSync(fp);
         return { filename: f, size: stat.size, mtime: stat.mtime.toISOString(), ext: path.extname(f).slice(1) };
       })
@@ -495,7 +502,7 @@ app.get('/api/settings/pick-app', (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const type  = req.query.type === 'image' ? 'image' : 'video';
   const title = type === 'image' ? '이미지 뷰어 선택' : '동영상 플레이어 선택';
-  const tmpPs1 = path.join(DOWNLOADS_DIR, '_picker_tmp.ps1');
+  const tmpPs1 = path.join(getDownloadsDir(), '_picker_tmp.ps1');
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
@@ -533,7 +540,7 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
     '$d.Filter = "cookies.txt|cookies.txt|텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*"',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Get-Content $d.FileName -Raw }',
   ].join('\n');
-  const tmpPs1 = path.join(DOWNLOADS_DIR, `_picker_${Date.now()}.ps1`);
+  const tmpPs1 = path.join(getDownloadsDir(), `_picker_${Date.now()}.ps1`);
   try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch { return res.json({ content: null }); }
   exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
@@ -586,7 +593,7 @@ app.delete('/api/settings/cookies', (req, res) => {
 // Opens Windows file picker for cookies.txt and saves the path
 app.get('/api/settings/pick-cookies', (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
-  const tmpPs1 = path.join(DOWNLOADS_DIR, '_picker_cookies.ps1');
+  const tmpPs1 = path.join(getDownloadsDir(), '_picker_cookies.ps1');
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
@@ -605,6 +612,53 @@ app.get('/api/settings/pick-cookies', (req, res) => {
     }
     res.json({ path: picked || null });
   });
+});
+
+// ── GET /api/settings/download-folder ────────
+app.get('/api/settings/download-folder', (req, res) => {
+  res.json({ path: getDownloadsDir() });
+});
+
+// ── GET /api/settings/pick-download-folder ───
+// Opens Windows FolderBrowserDialog starting at current downloads folder
+app.get('/api/settings/pick-download-folder', (req, res) => {
+  if (process.platform !== 'win32') return res.json({ path: null });
+  // Single backslashes — PowerShell double-quoted strings don't need escaping
+  const currentDir = getDownloadsDir();
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms',
+    '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
+    '$d.Description = "Download folder"',
+    `$d.SelectedPath = "${currentDir}"`,
+    '$d.ShowNewFolderButton = $true',
+    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+  ].join('\r\n');
+  const tmpPs1 = path.join(getDownloadsDir(), `_fpick_${Date.now()}.ps1`);
+  // Write UTF-16 LE with BOM — PowerShell reads this correctly on all Windows locales
+  try { fs.writeFileSync(tmpPs1, Buffer.from('﻿' + script, 'utf16le')); } catch { return res.json({ path: null }); }
+  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
+    try { fs.unlinkSync(tmpPs1); } catch {}
+    const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
+    if (picked) {
+      if (!fs.existsSync(picked)) try { fs.mkdirSync(picked, { recursive: true }); } catch {}
+      const c = loadConfig();
+      c.downloadsDir = picked;
+      saveConfig(c);
+    }
+    res.json({ path: picked || null });
+  });
+});
+
+// ── GET /api/settings/open-downloads-folder ──
+// Opens the downloads folder in Windows Explorer
+app.get('/api/settings/open-downloads-folder', (req, res) => {
+  const dir = getDownloadsDir();
+  if (process.platform === 'win32') {
+    exec(`explorer "${dir.replace(/"/g, '\\"')}"`);
+  } else {
+    exec(`xdg-open "${dir.replace(/"/g, '\\"')}"`);
+  }
+  res.json({ ok: true });
 });
 
 // ── POST /api/files/open ─────────────────────
@@ -657,9 +711,9 @@ app.post('/api/files/delete', (req, res) => {
 // Delete all files in downloads/
 app.post('/api/files/clear', (req, res) => {
   try {
-    fs.readdirSync(DOWNLOADS_DIR)
+    fs.readdirSync(getDownloadsDir())
       .filter(f => !f.startsWith('.'))
-      .forEach(f => { try { fs.unlinkSync(path.join(DOWNLOADS_DIR, f)); } catch {} });
+      .forEach(f => { try { fs.unlinkSync(path.join(getDownloadsDir(), f)); } catch {} });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -752,10 +806,10 @@ async function downloadDirectUrl(url, title, res) {
     const baseName = sanitizeFilename(title || 'image');
     let finalName  = `${baseName}.${ext}`;
     let counter    = 1;
-    while (fs.existsSync(path.join(DOWNLOADS_DIR, finalName))) {
+    while (fs.existsSync(path.join(getDownloadsDir(), finalName))) {
       finalName = `${baseName} (${counter++}).${ext}`;
     }
-    const finalPath  = path.join(DOWNLOADS_DIR, finalName);
+    const finalPath  = path.join(getDownloadsDir(), finalName);
     const fileStream = fs.createWriteStream(finalPath);
 
     await new Promise((resolve, reject) => {
@@ -794,7 +848,7 @@ function safeFilePath(filename) {
   if (!filename) return null;
   const base = path.basename(filename);
   if (!base || base === '.' || base === '..') return null;
-  return path.join(DOWNLOADS_DIR, base);
+  return path.join(getDownloadsDir(), base);
 }
 
 function parseYtDlpError(stderr) {
@@ -825,9 +879,9 @@ function sanitizeFilename(name) {
 
 function cleanup(sessionId) {
   try {
-    fs.readdirSync(DOWNLOADS_DIR)
+    fs.readdirSync(getDownloadsDir())
       .filter(f => f.startsWith(sessionId))
-      .forEach(f => fs.unlinkSync(path.join(DOWNLOADS_DIR, f)));
+      .forEach(f => fs.unlinkSync(path.join(getDownloadsDir(), f)));
   } catch {}
 }
 
@@ -835,5 +889,6 @@ function cleanup(sessionId) {
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`yt-dlp: ${YT_DLP}`);
-  console.log(`downloads: ${DOWNLOADS_DIR}`);
+  const c = loadConfig();
+  console.log(`downloads: ${c.downloadsDir || path.join(__dirname, '..', 'downloads')}`);
 });

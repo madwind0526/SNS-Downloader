@@ -669,32 +669,44 @@ body {
   background: var(--bg);
   display: flex; flex-direction: column;
   align-items: center; justify-content: center;
-  gap: 28px; padding: 32px 24px;
+  padding: 32px 24px;
 }
-.platform-landing-logo { text-align: center; }
-.platform-landing-logo .title-main { font-size: 2.2rem; font-weight: 900; color: var(--text); }
-.platform-landing-logo .title-sub  { font-size: 1rem; color: var(--text-sub); }
-.platform-landing h2 { font-size: 1rem; color: var(--text-sub); text-align: center; margin: 0; }
-.platform-cards {
-  display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 320px;
+.pl-logo { text-align: center; margin-bottom: 44px; }
+.pl-logo-title {
+  font-size: 3.4rem; font-weight: 900; color: var(--text);
+  letter-spacing: 4px; line-height: 1;
 }
-.platform-card {
+.pl-logo-sub {
+  font-size: 1rem; font-weight: 500; color: var(--text-sub);
+  margin-top: 8px; letter-spacing: 0.3px;
+}
+.pl-select-label {
+  font-size: 0.82rem; color: var(--text-sub);
+  letter-spacing: 0.6px; margin-bottom: 22px;
+}
+.pl-cards {
+  display: flex; flex-direction: column;
+  gap: 20px; width: 100%; max-width: 300px;
+}
+.pl-card-wrap {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+}
+.pl-btn {
+  display: flex; align-items: center;
+  gap: 12px; width: 100%;
+  padding: 15px 20px;
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 20px 20px;
-  display: flex; gap: 16px; align-items: flex-start;
   cursor: pointer; transition: border-color .15s, background .15s;
   text-align: left;
 }
-.platform-card:hover  { border-color: var(--accent); background: var(--accent-lo); }
-.platform-card-icon   { font-size: 1.8rem; flex-shrink: 0; line-height: 1; }
-.platform-card-title  { font-weight: 700; font-size: 0.95rem; color: var(--text); margin-bottom: 4px; }
-.platform-card-desc   { font-size: 0.78rem; color: var(--text-sub); line-height: 1.5; }
-.platform-card-badge  {
-  display: inline-block; margin-top: 6px; padding: 2px 8px;
-  font-size: 0.7rem; border-radius: 20px; font-weight: 600;
-  background: var(--danger-lo); color: var(--danger);
+.pl-btn:hover { border-color: var(--accent); background: var(--accent-lo); }
+.pl-btn-title  { font-weight: 800; font-size: 1.05rem; color: var(--text); }
+.pl-btn-server { font-size: 0.74rem; color: var(--text-sub); opacity: .6; }
+.pl-btn-desc   {
+  font-size: 0.71rem; color: var(--text-sub); opacity: .5;
+  padding-left: 4px;
 }
 
 /* Cookie modal */

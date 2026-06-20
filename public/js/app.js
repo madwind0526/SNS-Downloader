@@ -1,3 +1,6 @@
+// ── Runtime constants ────────────────────────
+const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
 // ── Platform detection ──────────────────────
 const PLATFORMS = {
   youtube:   { regex: /youtube\.com|youtu\.be/,     label: 'YouTube',     icon: '▶' },
@@ -75,20 +78,27 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
   });
 });
 
-// ── Power button — open popup window ────────
+// ── Power button — open / close popup window ─
 const powerBtn = $('powerBtn');
 const isPopup  = !!(window.opener && !window.opener.closed);
 powerBtn.title = isPopup ? '창 닫기' : '앱 창으로 열기';
+
+let _appPopup = null;
 powerBtn.addEventListener('click', () => {
   if (isPopup) {
     window.close();
-  } else {
-    const popup = window.open(
-      location.href, 'snsdownloader',
-      'width=560,height=900,toolbar=no,location=no,menubar=no,status=no,resizable=yes'
-    );
-    if (!popup || popup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
+    return;
   }
+  if (_appPopup && !_appPopup.closed) {
+    _appPopup.close();
+    _appPopup = null;
+    return;
+  }
+  _appPopup = window.open(
+    location.href, 'snsdownloader',
+    'width=560,height=900,toolbar=no,location=no,menubar=no,status=no,resizable=yes'
+  );
+  if (!_appPopup || _appPopup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
 });
 
 // ── Settings panel ──────────────────────────
@@ -160,12 +170,15 @@ document.querySelectorAll('[data-theme-btn]').forEach(btn => {
 
 // ── Version ───────────────────────────────────
 fetch('/api/version').then(r => r.json()).then(d => {
+  const v  = `v${d.version}`;
   const el = $('appVersion');
-  if (el) el.textContent = `v${d.version}`;
+  const pl = $('plVersion');
+  if (el) el.textContent = v;
+  if (pl) pl.textContent = v;
 }).catch(() => {});
 
 // ── Platform Landing ──────────────────────────
-const PLATFORM_KEY = 'sns-dl-platform';
+const isAppMode = new URLSearchParams(location.search).has('mode');
 
 function showPlatformLanding() {
   $('platformLanding').style.display = 'flex';
@@ -175,22 +188,33 @@ function hidePlatformLanding() {
 }
 
 $('platformPC')?.addEventListener('click', () => {
-  localStorage.setItem(PLATFORM_KEY, 'pc');
-  hidePlatformLanding();
+  const w = 420, h = 820;
+  const left = Math.round((screen.availWidth  - w) / 2);
+  const top  = Math.round((screen.availHeight - h) / 2);
+  const popup = window.open(
+    'http://localhost:3001/?mode=app',
+    'snsdownloader-pc',
+    `width=${w},height=${h},left=${left},top=${top},toolbar=no,location=no,menubar=no,status=no,resizable=yes`
+  );
+  if (!popup || popup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
 });
 
 $('platformAndroid')?.addEventListener('click', () => {
-  localStorage.setItem(PLATFORM_KEY, 'android');
-  window.location.href = RENDER_URL;
+  const w = screen.availWidth, h = screen.availHeight;
+  const popup = window.open(
+    RENDER_URL,
+    'snsdownloader-mobile',
+    `width=${w},height=${h},left=0,top=0,toolbar=no,location=no,menubar=no,status=no,resizable=yes`
+  );
+  if (!popup || popup.closed) alert('팝업이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도하세요.');
 });
 
-// Show landing on first visit (only when on local server)
-if (isLocal && !localStorage.getItem(PLATFORM_KEY)) {
+// Show landing when on local server and not in app mode
+if (isLocal && !isAppMode) {
   showPlatformLanding();
 }
 
 $('resetPlatformBtn')?.addEventListener('click', () => {
-  localStorage.removeItem(PLATFORM_KEY);
   settingsOverlay.classList.remove('open');
   showPlatformLanding();
 });
@@ -433,7 +457,6 @@ function buildFormatList(formats, mediaType) {
 }
 
 // ── Download selected items ──────────────────
-const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 let sessionFiles = []; // server filenames downloaded this session, for cleanup
 
 function deleteSessionFiles() {
@@ -803,6 +826,40 @@ $('resetImageViewerBtn').addEventListener('click', () => {
 });
 
 refreshAppPickerUI();
+
+// ── Download folder settings ──────────────────
+async function refreshFolderUI() {
+  try {
+    const d = await (await fetch('/api/settings/download-folder')).json();
+    const el = $('folderPath');
+    if (el && d.path) el.textContent = d.path;
+  } catch {}
+}
+
+if (isLocal) {
+  refreshFolderUI();
+
+  $('folderPath')?.addEventListener('click', async () => {
+    try { await fetch('/api/settings/open-downloads-folder'); } catch {}
+  });
+
+  $('changeFolderBtn')?.addEventListener('click', async () => {
+    try {
+      showToast('폴더 선택 창 열리는 중...');
+      const d = await (await fetch('/api/settings/pick-download-folder')).json();
+      if (d.path) {
+        const el = $('folderPath');
+        if (el) el.textContent = d.path;
+        showToast('다운로드 폴더 변경됨');
+      }
+    } catch (e) {
+      alert('폴더 선택 실패: ' + e.message);
+    }
+  });
+} else {
+  const sec = $('folderSection');
+  if (sec) sec.style.display = 'none';
+}
 
 // ── Cookies ───────────────────────────────────
 async function refreshCookiesUI() {
