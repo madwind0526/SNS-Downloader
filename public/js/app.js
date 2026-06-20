@@ -852,13 +852,7 @@ function withAuthToken(url) {
 }
 
 function triggerServerDownload(downloadUrl, filename) {
-  const a = document.createElement('a');
-  a.href = withAuthToken(downloadUrl);
-  if (filename) a.download = filename;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  window.location.href = withAuthToken(downloadUrl);
 }
 
 function showError(msg) {
