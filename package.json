@@ -1,6 +1,6 @@
 {
   "name": "sns-downloader",
-  "version": "1.2",
+  "version": "1.3",
   "description": "SNS video downloader web app",
   "main": "server/index.js",
   "scripts": {

@@ -2,6 +2,51 @@
 const isLocal = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 // True when the server is a Windows PC (localhost OR WiFi LAN) — set after /api/version fetch
 let isPCServer = isLocal;
+let mobileDirHandle = null;
+const mobileFileHandles = new Map();
+const PHONE_FOLDER_DB = 'sns-downloader-folder';
+const PHONE_FOLDER_STORE = 'handles';
+const PHONE_FOLDER_KEY = 'phone-folder';
+const PHONE_DEFAULT_PATH = '/storage/emulated/0/Documents/SNS-Downloader';
+
+function canUsePhoneFolderPicker() {
+  return window.isSecureContext && typeof window.showDirectoryPicker === 'function';
+}
+
+function phoneFolderFallbackText() {
+  if (!window.isSecureContext) {
+    return 'HTTP 접속에서는 폰 폴더를 직접 선택할 수 없습니다. 브라우저 기본 Downloads에 저장됩니다.';
+  }
+  return '이 브라우저는 폰 폴더 직접 저장을 지원하지 않습니다. 브라우저 기본 Downloads에 저장됩니다.';
+}
+
+function openPhoneFolderDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(PHONE_FOLDER_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(PHONE_FOLDER_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getStoredPhoneFolder() {
+  if (!window.indexedDB) return null;
+  const db = await openPhoneFolderDb();
+  return new Promise(resolve => {
+    const req = db.transaction(PHONE_FOLDER_STORE, 'readonly').objectStore(PHONE_FOLDER_STORE).get(PHONE_FOLDER_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function storePhoneFolder(handle) {
+  if (!window.indexedDB) return;
+  const db = await openPhoneFolderDb();
+  await new Promise(resolve => {
+    const req = db.transaction(PHONE_FOLDER_STORE, 'readwrite').objectStore(PHONE_FOLDER_STORE).put(handle, PHONE_FOLDER_KEY);
+    req.onsuccess = req.onerror = resolve;
+  });
+}
 
 // ── Auth ──────────────────────────────────────
 const TOKEN_KEY = 'sns-dl-token';
@@ -277,15 +322,20 @@ fetch('/api/version').then(r => r.json()).then(d => {
   if (pl) pl.textContent = v;
   if (d.platform === 'win32') {
     isPCServer = true;
-    if (!isLocal) setupPCServerUI(); // WiFi: enable PC folder UI
+    setupPCServerUI();
   }
+  updateFolderSections();
+  updateConnectionBadge();
 }).catch(() => {});
 
 // ── Connection mode badge ─────────────────────
 const connectionBadge = $('connectionBadge');
-if (connectionBadge) {
-  connectionBadge.setAttribute('data-label', isLocal ? 'PC Local' : 'Render Server');
+function updateConnectionBadge() {
+  if (!connectionBadge) return;
+  const label = isLocal ? 'PC Local' : (isPCServer ? 'Phone via PC' : 'Render Server');
+  connectionBadge.setAttribute('data-label', label);
 }
+updateConnectionBadge();
 
 // ── Platform Landing ──────────────────────────
 const isAppMode = new URLSearchParams(location.search).has('mode');
@@ -662,7 +712,11 @@ downloadSelectedBtn.addEventListener('click', async () => {
         const blob = await res.blob();
         const rawFn = res.headers.get('X-Filename');
         filename = rawFn ? decodeURIComponent(rawFn) : 'video.mp4';
-        triggerDownload(blob, filename);
+        const savedToPhone = await saveBlobToPhoneFolder(blob, filename);
+        if (!savedToPhone) {
+          triggerDownload(blob, filename);
+          if (!canUsePhoneFolderPicker()) showToast('브라우저 기본 Downloads에 저장됩니다');
+        }
         sessionFiles.push(filename);
         if (blob.type.startsWith('video/') || blob.type.startsWith('audio/') || blob.type.startsWith('image/')) {
           lastVideoBlob = blob;
@@ -758,7 +812,10 @@ function triggerDownload(blob, filename) {
   const blobUrl = URL.createObjectURL(blob);
   a.href     = blobUrl;
   a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
+  a.remove();
   // Delay revoke: Android may show a security dialog before saving,
   // and the download needs the URL to still be valid after confirmation.
   setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
@@ -870,7 +927,69 @@ function renderHistory() {
 }
 
 // ── Mobile: browse device Downloads folder via File System Access API ────────
+async function requestPhoneFolderHandle({ prompt = false } = {}) {
+  if (!canUsePhoneFolderPicker()) {
+    showToast(phoneFolderFallbackText());
+    return null;
+  }
+
+  let handle = prompt ? null : (mobileDirHandle || await getStoredPhoneFolder());
+  if (handle) {
+    const perm = await handle.queryPermission?.({ mode: 'readwrite' });
+    if (perm !== 'granted') {
+      const next = await handle.requestPermission?.({ mode: 'readwrite' });
+      if (next !== 'granted') handle = null;
+    }
+  }
+
+  if (!handle) {
+    showToast('Documents 폴더 또는 SNS-Downloader 폴더를 선택하세요');
+    const selected = await window.showDirectoryPicker({ startIn: 'documents', mode: 'readwrite' });
+    handle = selected.name === 'SNS-Downloader'
+      ? selected
+      : await selected.getDirectoryHandle('SNS-Downloader', { create: true });
+    await storePhoneFolder(handle);
+  }
+
+  mobileDirHandle = handle;
+  refreshMobileFolderUI();
+  return handle;
+}
+
+async function saveBlobToPhoneFolder(blob, filename) {
+  try {
+    const dir = await requestPhoneFolderHandle();
+    if (!dir) return false;
+    const fileHandle = await dir.getFileHandle(filename, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    mobileFileHandles.set(filename, fileHandle);
+    return true;
+  } catch (e) {
+    if (e.name !== 'AbortError') showToast('폰 저장 폴더에 저장할 수 없습니다');
+    return false;
+  }
+}
+
 function showMobileFilesUI(container) {
+  if (!canUsePhoneFolderPicker()) {
+    container.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px;gap:16px;text-align:center">
+        <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".35">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </svg>
+        <p style="color:var(--text-sub);font-size:.95rem;line-height:1.6">
+          ${escHtml(phoneFolderFallbackText())}<br>
+          파일 앱 또는 브라우저 다운로드 목록에서 확인하세요.
+        </p>
+        <p style="color:var(--text-sub);font-size:.78rem;opacity:.65">
+          Documents/SNS-Downloader 자동 저장은 이 브라우저에서 사용할 수 없습니다.
+        </p>
+      </div>`;
+    return;
+  }
+
   container.innerHTML = `
     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px;gap:16px">
       <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".35">
@@ -882,18 +1001,19 @@ function showMobileFilesUI(container) {
       <button id="openDlFolderBtn" style="
         padding:10px 24px;border-radius:var(--radius-sm);border:none;
         background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer">
-        📂 다운로드 폴더 열기
+        📂 폰 저장 폴더 열기
       </button>
-      <p style="color:var(--text-sub);font-size:.73rem;opacity:.55">/storage/emulated/0/Download</p>
+      <p style="color:var(--text-sub);font-size:.73rem;opacity:.55">Documents/SNS-Downloader</p>
     </div>`;
 
   document.getElementById('openDlFolderBtn')?.addEventListener('click', async () => {
-    if (!window.showDirectoryPicker) {
-      showToast('이 브라우저에서는 지원되지 않습니다');
+    if (!canUsePhoneFolderPicker()) {
+      showToast(phoneFolderFallbackText());
       return;
     }
     try {
-      const dirHandle = await window.showDirectoryPicker({ startIn: 'downloads', mode: 'read' });
+      const dirHandle = await requestPhoneFolderHandle({ prompt: true });
+      if (!dirHandle) return;
       await listMobileDir(container, dirHandle);
     } catch (e) {
       if (e.name !== 'AbortError') showToast('폴더를 열 수 없습니다');
@@ -902,13 +1022,16 @@ function showMobileFilesUI(container) {
 }
 
 async function listMobileDir(container, dirHandle) {
+  mobileDirHandle = dirHandle;
+  mobileFileHandles.clear();
   container.innerHTML = `<div class="loading"><div class="spinner"></div><span>읽는 중...</span></div>`;
   const files = [];
   try {
     for await (const [name, handle] of dirHandle) {
       if (handle.kind === 'file') {
         const file = await handle.getFile();
-        files.push({ name, size: file.size, mtime: file.lastModified });
+        mobileFileHandles.set(name, handle);
+        files.push({ name, size: file.size, mtime: file.lastModified, ext: name.split('.').pop() || '?' });
       }
     }
   } catch {
@@ -930,10 +1053,16 @@ async function listMobileDir(container, dirHandle) {
         <span>${files.length}개 파일</span>
       </div>
       ${files.map(f => `
-        <div class="file-item">
+        <div class="file-item" data-mobile="true" data-filename="${escHtml(f.name)}">
+          <div class="file-ext-badge">${escHtml(f.ext)}</div>
           <div class="file-info">
             <div class="file-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
             <div class="file-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
+          </div>
+          <div class="file-actions">
+            <button class="file-action-btn" data-action="open">열기</button>
+            <button class="file-action-btn" data-action="reveal">탐색기</button>
+            <button class="file-action-btn danger" data-action="delete">삭제</button>
           </div>
         </div>
       `).join('')}
@@ -945,8 +1074,22 @@ async function renderFiles() {
   const container = $('filesList');
 
   // Render server: files live on device — open folder picker via File System Access API
-  if (!isPCServer) {
-    showMobileFilesUI(container);
+  if (!isLocal) {
+    if (!canUsePhoneFolderPicker()) {
+      showMobileFilesUI(container);
+      return;
+    }
+    const handle = mobileDirHandle || await getStoredPhoneFolder();
+    if (handle) {
+      try {
+        mobileDirHandle = handle;
+        await listMobileDir(container, handle);
+      } catch {
+        showMobileFilesUI(container);
+      }
+    } else {
+      showMobileFilesUI(container);
+    }
     return;
   }
 
@@ -1009,6 +1152,29 @@ $('filesList').addEventListener('click', async e => {
   const filename = item?.dataset.filename;
   if (!filename) return;
   const action = btn.dataset.action;
+  if (item.dataset.mobile === 'true') {
+    const handle = mobileFileHandles.get(filename);
+    if (action === 'open') {
+      if (!handle) return showToast('파일을 열 수 없습니다');
+      const file = await handle.getFile();
+      const url = URL.createObjectURL(file);
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } else if (action === 'reveal') {
+      const dir = await requestPhoneFolderHandle({ prompt: true });
+      if (dir) await listMobileDir($('filesList'), dir);
+    } else if (action === 'delete') {
+      if (!mobileDirHandle) return showToast('폴더 권한이 없습니다');
+      if (!confirm(`"${filename}"\n삭제할까요?`)) return;
+      try {
+        await mobileDirHandle.removeEntry(filename);
+        await listMobileDir($('filesList'), mobileDirHandle);
+      } catch {
+        showToast('삭제할 수 없습니다');
+      }
+    }
+    return;
+  }
   if (action === 'open') {
     const ext     = filename.split('.').pop().toLowerCase();
     const isVideo = ['mp4','webm','mkv','avi','mov','m4v','flv'].includes(ext);
@@ -1126,13 +1292,55 @@ function setupPCServerUI() {
   }
 }
 
-if (isLocal) {
-  setupPCServerUI();
-} else {
-  // Hide folder section initially; shown again if server turns out to be a Windows PC
-  const sec = $('folderSection');
-  if (sec) sec.style.display = 'none';
+async function refreshMobileFolderUI() {
+  const el = $('mobileFolderPath');
+  const btn = $('changeMobileFolderBtn');
+  if (!el) return;
+  if (!canUsePhoneFolderPicker()) {
+    el.textContent = PHONE_DEFAULT_PATH;
+    el.title = phoneFolderFallbackText();
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '미지원';
+    }
+    return;
+  }
+  const handle = mobileDirHandle || await getStoredPhoneFolder();
+  el.textContent = handle ? `/storage/emulated/0/Documents/${handle.name}` : PHONE_DEFAULT_PATH;
+  el.title = 'Documents 폴더 안의 SNS-Downloader 폴더를 선택합니다';
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = '변경';
+  }
 }
+
+async function pickMobileFolderFromSettings() {
+  try {
+    const handle = await requestPhoneFolderHandle({ prompt: true });
+    if (handle) {
+      await refreshMobileFolderUI();
+      showToast('Mobile 다운로드 폴더가 설정되었습니다');
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') showToast('Mobile 폴더를 선택할 수 없습니다');
+  }
+}
+
+$('changeMobileFolderBtn')?.addEventListener('click', pickMobileFolderFromSettings);
+$('mobileFolderPath')?.addEventListener('click', pickMobileFolderFromSettings);
+refreshMobileFolderUI();
+
+function updateFolderSections() {
+  const pcSec = $('folderSection');
+  const mobileSec = $('mobileFolderSection');
+  if (pcSec) pcSec.style.display = '';
+  if (mobileSec) mobileSec.style.display = '';
+  refreshFolderUI();
+  refreshMobileFolderUI();
+}
+
+updateFolderSections();
+if (isLocal) setupPCServerUI();
 
 // ── Cookies ───────────────────────────────────
 async function refreshCookiesUI() {

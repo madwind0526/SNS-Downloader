@@ -12,8 +12,8 @@
   --success:      #4ade80;
   --text:         #e0e0ee;
   --text-sub:     #6a6a8a;
-  --header-h:     64px;
-  --nav-h:        64px;
+  --header-h:     clamp(70px, 4.6rem, 88px);
+  --nav-h:        clamp(70px, 4.6rem, 88px);
   --radius:       14px;
   --radius-sm:    8px;
   --radius-xs:    6px;
@@ -34,11 +34,11 @@ button { font-family: inherit; cursor: pointer; }
 
 html, body { height: 100%; overscroll-behavior: none; }
 
-/* Fixed app scale so PC Local and Render windows match at the same window size. */
-html { font-size: 12px; }
+/* Responsive app scale. Rem-based UI follows this size across PC and mobile. */
+html { font-size: clamp(15px, calc(10px + 1.25vw), 20px); }
 
 @media (max-width: 340px) {
-  html { font-size: 11px; }
+  html { font-size: 15px; }
 }
 
 body {
@@ -926,6 +926,12 @@ body {
   transition: background .15s;
 }
 .text-btn:hover { background: var(--accent-lo); }
+.text-btn:disabled {
+  color: var(--text-sub);
+  opacity: .55;
+  cursor: not-allowed;
+}
+.text-btn:disabled:hover { background: transparent; }
 
 .danger-btn {
   width: 100%;

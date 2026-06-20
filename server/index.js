@@ -388,9 +388,18 @@ app.post('/api/info', async (req, res) => {
     });
   };
 
-  const isLoginError = t =>
-    t.includes('login_required') || t.includes('empty media') ||
-    t.includes('Login required') || t.includes('로그인');
+  const isLoginError = t => {
+    const s = String(t || '').toLowerCase();
+    return s.includes('login_required') ||
+      s.includes('empty media') ||
+      s.includes('login required') ||
+      s.includes('sign in') ||
+      s.includes('cookies') ||
+      s.includes('age-restricted') ||
+      s.includes('confirm your age') ||
+      s.includes('inappropriate') ||
+      String(t || '').includes('로그인');
+  };
 
   try {
     // First attempt — no cookies (avoids format conflicts for public content)
@@ -770,9 +779,9 @@ app.get('/api/settings/pick-download-folder', (req, res) => {
 app.get('/api/settings/open-downloads-folder', (req, res) => {
   const dir = getDownloadsDir();
   if (process.platform === 'win32') {
-    exec(`explorer "${dir.replace(/"/g, '\\"')}"`);
+    execFile('explorer.exe', [dir]);
   } else {
-    exec(`xdg-open "${dir.replace(/"/g, '\\"')}"`);
+    execFile('xdg-open', [dir]);
   }
   res.json({ ok: true });
 });
@@ -803,9 +812,9 @@ app.post('/api/files/reveal', (req, res) => {
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
 
   if (process.platform === 'win32') {
-    exec(`explorer /select,"${fp.replace(/"/g, '\\"')}"`);
+    execFile('explorer.exe', [`/select,${fp}`]);
   } else {
-    exec(`xdg-open "${path.dirname(fp).replace(/"/g, '\\"')}"`);
+    execFile('xdg-open', [path.dirname(fp)]);
   }
   res.json({ ok: true });
 });
