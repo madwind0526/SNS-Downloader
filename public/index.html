@@ -35,6 +35,11 @@
         </div>
 
         <div class="settings-section">
+          <p class="settings-label">사용 환경</p>
+          <button class="text-btn" id="resetPlatformBtn">환경 재선택 (PC / Android)</button>
+        </div>
+
+        <div class="settings-section">
           <p class="settings-label">선호 화질</p>
           <div class="seg-control">
             <button class="seg-btn" data-quality="480">480p</button>
@@ -132,6 +137,32 @@
         </div>
 
       </div>
+    </div>
+  </div>
+
+  <!-- ── Platform Landing ─────────────────────────── -->
+  <div id="platformLanding" class="platform-landing" style="display:none">
+    <div class="platform-landing-logo">
+      <div class="title-main">SNS</div>
+      <div class="title-sub">Downloader</div>
+    </div>
+    <h2>사용 환경을 선택해주세요</h2>
+    <div class="platform-cards">
+      <button class="platform-card" id="platformPC">
+        <div class="platform-card-icon">🖥️</div>
+        <div>
+          <div class="platform-card-title">PC</div>
+          <div class="platform-card-desc">Windows 로컬 서버에서 실행<br>로그인 필요 콘텐츠 지원</div>
+        </div>
+      </button>
+      <button class="platform-card" id="platformAndroid">
+        <div class="platform-card-icon">📱</div>
+        <div>
+          <div class="platform-card-title">Android / 외부 접속</div>
+          <div class="platform-card-desc">Render 공용 서버로 연결</div>
+          <span class="platform-card-badge">공개 콘텐츠만 가능</span>
+        </div>
+      </button>
     </div>
   </div>
 

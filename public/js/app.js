@@ -143,12 +143,51 @@ settingsOverlay.addEventListener('click', e => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
 });
 
+// ── Theme (persist to localStorage) ──────────
+const savedTheme = localStorage.getItem('sns-dl-theme') || 'dark';
+document.documentElement.setAttribute('data-theme', savedTheme);
 document.querySelectorAll('[data-theme-btn]').forEach(btn => {
+  if (btn.dataset.themeBtn === savedTheme) btn.classList.add('active');
+  else btn.classList.remove('active');
   btn.addEventListener('click', () => {
     document.querySelectorAll('[data-theme-btn]').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    document.documentElement.setAttribute('data-theme', btn.dataset.themeBtn);
+    const theme = btn.dataset.themeBtn;
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('sns-dl-theme', theme);
   });
+});
+
+// ── Platform Landing ──────────────────────────
+const RENDER_URL = 'https://sns-downloader.onrender.com';
+const PLATFORM_KEY = 'sns-dl-platform';
+
+function showPlatformLanding() {
+  $('platformLanding').style.display = 'flex';
+}
+function hidePlatformLanding() {
+  $('platformLanding').style.display = 'none';
+}
+
+$('platformPC')?.addEventListener('click', () => {
+  localStorage.setItem(PLATFORM_KEY, 'pc');
+  hidePlatformLanding();
+});
+
+$('platformAndroid')?.addEventListener('click', () => {
+  localStorage.setItem(PLATFORM_KEY, 'android');
+  window.location.href = RENDER_URL;
+});
+
+// Show landing on first visit (only when on local server)
+if (isLocal && !localStorage.getItem(PLATFORM_KEY)) {
+  showPlatformLanding();
+}
+
+$('resetPlatformBtn')?.addEventListener('click', () => {
+  localStorage.removeItem(PLATFORM_KEY);
+  settingsOverlay.classList.remove('open');
+  showPlatformLanding();
 });
 document.querySelectorAll('[data-quality]').forEach(btn => {
   btn.addEventListener('click', () => {
