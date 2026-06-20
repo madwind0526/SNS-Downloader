@@ -640,12 +640,10 @@ function buildFormatList(formats, mediaType) {
 }
 
 // ── Download selected items ──────────────────
-// Mobile only: track Render server temp files for cleanup after session
+// Mobile/Render prepared files stay on the server so phone-save can be retried.
 let sessionFiles = [];
 
 function deleteSessionFiles() {
-  if (isLocal) return; // PC files are permanent, never delete
-  sessionFiles.forEach(fn => postFileAction('/api/files/delete', fn));
   sessionFiles = [];
 }
 
@@ -653,8 +651,6 @@ downloadSelectedBtn.addEventListener('click', async () => {
   const checkedItems = [...itemsContainer.querySelectorAll('.media-item')]
     .filter(el => el.querySelector('.item-chk')?.checked);
   if (!checkedItems.length) return;
-
-  if (!isLocal) deleteSessionFiles(); // Mobile: clean up previous session temp files
 
   itemsContainer.style.display      = 'none';
   downloadSelectedBtn.style.display = 'none';
@@ -810,7 +806,7 @@ function showSuccess(count, blob, pcFile, serverDownloads = []) {
 }
 
 resetBtn.addEventListener('click', () => {
-  deleteSessionFiles(); // remove downloaded files from server
+  deleteSessionFiles();
   if (previewVideo.src?.startsWith('blob:')) URL.revokeObjectURL(previewVideo.src);
   if (previewImage.src?.startsWith('blob:')) URL.revokeObjectURL(previewImage.src);
   previewVideo.src = '';
@@ -1109,6 +1105,32 @@ async function renderFiles() {
 
   // Render server: files live on device — open folder picker via File System Access API
   if (!isLocal) {
+    try {
+      const r = await apiFetch('/api/files');
+      const serverFiles = await r.json();
+      if (Array.isArray(serverFiles) && serverFiles.length) {
+        const header = isPCServer
+          ? 'PC 서버에 준비된 파일'
+          : 'Render 서버에 준비된 파일';
+        container.innerHTML = `
+          <div style="padding:8px 12px 4px;font-size:0.75rem;color:var(--text-sub)">${header}</div>
+          ${serverFiles.map(f => `
+            <div class="file-item" data-filename="${escHtml(f.filename)}">
+              <div class="file-ext-badge">${escHtml(f.ext || '?')}</div>
+              <div class="file-info">
+                <div class="file-name" title="${escHtml(f.filename)}">${escHtml(f.filename)}</div>
+                <div class="file-meta">${formatSize(f.size)} · ${formatDate(f.mtime)}</div>
+              </div>
+              <div class="file-actions">
+                <button class="file-action-btn" data-action="redownload">폰으로 저장</button>
+                ${isPCServer ? '' : '<button class="file-action-btn danger" data-action="delete">삭제</button>'}
+              </div>
+            </div>
+          `).join('')}`;
+        return;
+      }
+    } catch {}
+
     if (!canUsePhoneFolderPicker()) {
       showMobileFilesUI(container);
       return;
@@ -1207,6 +1229,10 @@ $('filesList').addEventListener('click', async e => {
         showToast('삭제할 수 없습니다');
       }
     }
+    return;
+  }
+  if (action === 'redownload') {
+    triggerServerDownload(`/api/files/download/${encodeURIComponent(filename)}`, filename);
     return;
   }
   if (action === 'open') {
