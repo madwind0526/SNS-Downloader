@@ -146,7 +146,7 @@ https://sns-downloader.onrender.com/api/version
 Expected JSON:
 
 ```json
-{"version":"1.13","platform":"linux"}
+{"version":"1.14","platform":"linux"}
 ```
 
 ## Render Cookies From Environment
@@ -167,3 +167,24 @@ const content = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8
 fs.writeFileSync(RUNTIME_COOKIES_FILE, content, 'utf8');
 ytDlpArgs.push('--cookies', RUNTIME_COOKIES_FILE);
 ```
+
+## User-Scoped Encrypted Render Cookies
+
+Render/Linux uses user sessions and per-user encrypted cookies instead of one shared server cookie.
+
+Storage:
+
+```text
+server/data/users.json
+server/data/cookies/{username}.enc
+```
+
+Runtime pattern:
+
+```js
+const key = deriveCookieKey(password, user.cookieKeySalt);
+const encrypted = encryptUserCookies(cookiesText, key);
+fs.writeFileSync(userCookiePath(username), JSON.stringify(encrypted, null, 2), 'utf8');
+```
+
+For yt-dlp, decrypt only for the current request, write a temporary `cookies.txt`, pass `--cookies`, then delete the temporary file when the process exits.

@@ -15,10 +15,13 @@ const { rateLimit } = require('express-rate-limit');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
-// ── Access token auth ────────────────────────
-// Set ACCESS_TOKEN env var (Render dashboard) to enable auth.
-// Empty / unset = no auth (local PC use).
+// ── Invite code and user sessions ────────────
+// ACCESS_TOKEN is an invite code for user registration on Render.
 const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
+const SESSION_COOKIE = 'snsdl_sid';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const COOKIE_UPLOAD_LIMIT_BYTES = 1024 * 1024;
+const sessions = new Map();
 
 function isLocalhostRequest(req) {
   const ip = req.ip || req.socket?.remoteAddress || '';
@@ -26,18 +29,57 @@ function isLocalhostRequest(req) {
     ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
 }
 
-function authMiddleware(req, res, next) {
-  if (!ACCESS_TOKEN) return next(); // auth disabled (no token configured)
-  // Requests from Windows localhost always pass for PC local use.
-  if (isLocalhostRequest(req)) return next();
-  const token = req.headers['x-token'] || req.query.token;
-  if (token === ACCESS_TOKEN) return next();
-  res.status(401).json({ error: '인증이 필요합니다.', needAuth: true });
+function requiresUserAuth(req) {
+  return process.platform !== 'win32' && !isLocalhostRequest(req);
 }
 
-function cookieSettingsGuard(req, res, next) {
-  if (ACCESS_TOKEN || isLocalhostRequest(req)) return next();
-  res.status(403).json({ error: 'Render에서 쿠키 설정을 사용하려면 서버에 비밀번호 보호가 필요합니다.' });
+function parseCookies(req) {
+  return String(req.headers.cookie || '').split(';').reduce((acc, part) => {
+    const idx = part.indexOf('=');
+    if (idx < 0) return acc;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (key) acc[key] = decodeURIComponent(value);
+    return acc;
+  }, {});
+}
+
+function sessionCookieHeader(sessionId, maxAgeSeconds = Math.floor(SESSION_TTL_MS / 1000)) {
+  const secure = process.platform === 'win32' ? '' : '; Secure';
+  return `${SESSION_COOKIE}=${encodeURIComponent(sessionId)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+function clearSessionCookieHeader() {
+  const secure = process.platform === 'win32' ? '' : '; Secure';
+  return `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`;
+}
+
+function getSession(req) {
+  const sid = parseCookies(req)[SESSION_COOKIE];
+  if (!sid) return null;
+  const session = sessions.get(sid);
+  if (!session) return null;
+  if (Date.now() - session.lastSeenAt > SESSION_TTL_MS) {
+    sessions.delete(sid);
+    return null;
+  }
+  session.lastSeenAt = Date.now();
+  return { id: sid, ...session };
+}
+
+function attachUserSession(req, res, next) {
+  const session = getSession(req);
+  if (session) {
+    req.session = session;
+    req.user = { username: session.username, role: session.role };
+  }
+  next();
+}
+
+function userAuthMiddleware(req, res, next) {
+  if (!requiresUserAuth(req)) return next();
+  if (req.user) return next();
+  res.status(401).json({ error: '로그인이 필요합니다.', needLogin: true });
 }
 
 // ── Rate limiting (Render only — no token = local, skip) ─
@@ -70,15 +112,120 @@ const YT_DLP = process.platform === 'win32'
 
 // Simple server-side config (cookies path, etc.)
 const CONFIG_FILE = path.join(__dirname, 'config.json');
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const USER_COOKIES_DIR = path.join(DATA_DIR, 'cookies');
 const RUNTIME_COOKIES_FILE = path.join(os.tmpdir(), 'sns-downloader-cookies.txt');
 let envCookiesChecked = false;
 let envCookiesPath = null;
+
+function ensureDataDirs() {
+  fs.mkdirSync(USER_COOKIES_DIR, { recursive: true });
+}
 
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
 }
 function saveConfig(data) {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
+}
+
+function loadUsers() {
+  ensureDataDirs();
+  try {
+    const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    return Array.isArray(data.users) ? data : { users: [] };
+  } catch {
+    return { users: [] };
+  }
+}
+
+function saveUsers(data) {
+  ensureDataDirs();
+  fs.writeFileSync(USERS_FILE, JSON.stringify({ users: data.users || [] }, null, 2), 'utf8');
+}
+
+function normalizeUsername(username) {
+  return String(username || '').trim().toLowerCase();
+}
+
+function isAdminUsername(username) {
+  return normalizeUsername(username) === 'admin';
+}
+
+function validateUsername(username) {
+  const normalized = normalizeUsername(username);
+  if (!/^[a-z0-9_-]{3,24}$/.test(normalized)) {
+    return '사용자 이름은 영문 소문자, 숫자, _,- 조합 3~24자로 입력해주세요.';
+  }
+  if (!isAdminUsername(normalized) && normalized.includes('admin')) {
+    return '일반 사용자 이름에는 admin을 포함할 수 없습니다.';
+  }
+  return null;
+}
+
+function validatePassword(password) {
+  if (String(password || '').length < 8) return '비밀번호는 8자 이상 입력해주세요.';
+  if (String(password || '').length > 128) return '비밀번호는 128자 이하로 입력해주세요.';
+  return null;
+}
+
+function scryptBase64(secret, salt, len = 64) {
+  return crypto.scryptSync(String(secret), Buffer.from(salt, 'base64'), len).toString('base64');
+}
+
+function createPasswordRecord(password) {
+  const salt = crypto.randomBytes(16).toString('base64');
+  return { passwordSalt: salt, passwordHash: scryptBase64(password, salt, 64) };
+}
+
+function verifyPassword(password, user) {
+  const candidate = Buffer.from(scryptBase64(password, user.passwordSalt, 64), 'base64');
+  const expected = Buffer.from(user.passwordHash, 'base64');
+  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+}
+
+function deriveCookieKey(password, salt) {
+  return crypto.scryptSync(String(password), Buffer.from(salt, 'base64'), 32);
+}
+
+function publicUser(user) {
+  if (!user) return null;
+  return {
+    username: user.username,
+    role: user.role,
+    createdAt: user.createdAt,
+    lastLoginAt: user.lastLoginAt || null,
+    cookieSize: user.cookieSize || 0,
+    cookieUpdatedAt: user.cookieUpdatedAt || null,
+  };
+}
+
+function userCookiePath(username) {
+  return path.join(USER_COOKIES_DIR, `${normalizeUsername(username)}.enc`);
+}
+
+function hasUserCookie(username) {
+  return fs.existsSync(userCookiePath(username));
+}
+
+function removeUserSessions(username) {
+  const normalized = normalizeUsername(username);
+  for (const [sid, session] of sessions.entries()) {
+    if (session.username === normalized) sessions.delete(sid);
+  }
+}
+
+function createUserSession(res, user, password) {
+  const sid = crypto.randomBytes(32).toString('hex');
+  sessions.set(sid, {
+    username: user.username,
+    role: user.role,
+    cookieKey: deriveCookieKey(password, user.cookieKeySalt),
+    createdAt: Date.now(),
+    lastSeenAt: Date.now(),
+  });
+  res.setHeader('Set-Cookie', sessionCookieHeader(sid));
 }
 
 function normalizeCookiesText(content) {
@@ -107,6 +254,102 @@ function saveCookiesText(content, savePath) {
     path: savePath,
     cookieCount: normalized.split('\n').filter(l => l.trim() && !l.startsWith('#')).length,
   };
+}
+
+function validateCookieContent(content) {
+  const normalized = normalizeCookiesText(content);
+  const size = Buffer.byteLength(normalized, 'utf8');
+  if (size > COOKIE_UPLOAD_LIMIT_BYTES) {
+    const err = new Error('쿠키 파일은 1MB 이하만 등록할 수 있습니다.');
+    err.statusCode = 413;
+    throw err;
+  }
+  if (!isValidCookiesText(normalized)) {
+    const err = new Error('유효한 cookies.txt 파일이 아닙니다.\n"Get cookies.txt LOCALLY" 확장 프로그램으로 내보낸 파일을 사용하세요.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return { normalized, size };
+}
+
+function encryptUserCookies(content, key) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(content, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    version: 1,
+    algorithm: 'aes-256-gcm',
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+}
+
+function decryptUserCookiesFile(username, key) {
+  const raw = JSON.parse(fs.readFileSync(userCookiePath(username), 'utf8'));
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(raw.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(raw.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(raw.ciphertext, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+}
+
+function saveEncryptedUserCookies(req, content) {
+  if (!req.session?.cookieKey || !req.user?.username) {
+    const err = new Error('로그인이 필요합니다.');
+    err.statusCode = 401;
+    throw err;
+  }
+  const { normalized, size } = validateCookieContent(content);
+  const encrypted = encryptUserCookies(normalized, req.session.cookieKey);
+  ensureDataDirs();
+  fs.writeFileSync(userCookiePath(req.user.username), JSON.stringify(encrypted, null, 2), 'utf8');
+
+  const data = loadUsers();
+  const user = data.users.find(u => u.username === req.user.username);
+  if (user) {
+    user.cookieSize = size;
+    user.cookieUpdatedAt = new Date().toISOString();
+    saveUsers(data);
+  }
+  return {
+    path: userCookiePath(req.user.username),
+    cookieCount: normalized.split('\n').filter(l => l.trim() && !l.startsWith('#')).length,
+    size,
+  };
+}
+
+function removeEncryptedUserCookies(username) {
+  try { fs.unlinkSync(userCookiePath(username)); } catch {}
+  const data = loadUsers();
+  const user = data.users.find(u => u.username === normalizeUsername(username));
+  if (user) {
+    user.cookieSize = 0;
+    user.cookieUpdatedAt = null;
+    saveUsers(data);
+  }
+}
+
+function requestCookiesArgs(req) {
+  if (!requiresUserAuth(req)) return { args: cookiesArgs(), cleanup: () => {} };
+  if (!req.session?.cookieKey || !req.user?.username || !hasUserCookie(req.user.username)) {
+    return { args: [], cleanup: () => {} };
+  }
+
+  const tempPath = path.join(os.tmpdir(), `sns-dl-cookies-${req.user.username}-${crypto.randomBytes(8).toString('hex')}.txt`);
+  const content = decryptUserCookiesFile(req.user.username, req.session.cookieKey);
+  fs.writeFileSync(tempPath, content, 'utf8');
+  return {
+    args: ['--cookies', tempPath],
+    cleanup: () => { try { fs.unlinkSync(tempPath); } catch {} },
+  };
+}
+
+function requestHasCookies(req) {
+  if (!requiresUserAuth(req)) return cookiesArgs().length > 0;
+  return !!(req.user?.username && hasUserCookie(req.user.username));
 }
 
 function ensureEnvCookies() {
@@ -319,21 +562,16 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
+app.use(attachUserSession);
 
-// Auth + rate limit applied to all /api/* except /api/version and /api/auth
+// User login is required on Render APIs. Windows PC mode stays local-first.
 app.use('/api', (req, res, next) => {
-  if (req.path === '/version' || req.path === '/auth') return next();
-  authMiddleware(req, res, next);
+  const publicPaths = ['/version', '/auth', '/users/bootstrap', '/users/register', '/users/login', '/users/logout', '/users/me'];
+  if (publicPaths.includes(req.path)) return next();
+  userAuthMiddleware(req, res, next);
 });
 app.use('/api/info',     apiLimiter);
 app.use('/api/download', downloadLimiter);
-app.use([
-  '/api/settings/cookies',
-  '/api/settings/upload-cookies',
-  '/api/settings/pick-cookies-file',
-  '/api/settings/auto-cookies',
-  '/api/settings/pick-cookies',
-], cookieSettingsGuard);
 
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
@@ -342,13 +580,140 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 const { version } = require('../package.json');
 app.get('/api/version', (req, res) => res.json({ version, platform: process.platform }));
 
-// ── POST /api/auth ────────────────────────────
-// Validates access token. Returns authRequired flag so client knows whether to show auth screen.
+// ── User auth APIs ───────────────────────────
+app.get('/api/users/bootstrap', (req, res) => {
+  const users = loadUsers().users;
+  res.json({
+    needsAdmin: !users.some(u => u.username === 'admin'),
+    inviteRequired: true,
+    authRequired: requiresUserAuth(req),
+  });
+});
+
+app.get('/api/users/me', (req, res) => {
+  const session = getSession(req);
+  if (!requiresUserAuth(req)) {
+    return res.json({ ok: true, authRequired: false, user: null });
+  }
+  if (!session) return res.json({ ok: false, authRequired: true, user: null });
+  const user = loadUsers().users.find(u => u.username === session.username);
+  res.json({ ok: !!user, authRequired: true, user: publicUser(user) });
+});
+
+app.post('/api/users/register', (req, res) => {
+  const username = normalizeUsername(req.body.username);
+  const password = String(req.body.password || '');
+  const inviteCode = String(req.body.inviteCode || '').trim();
+  const usernameError = validateUsername(username);
+  const passwordError = validatePassword(password);
+  if (usernameError) return res.status(400).json({ error: usernameError });
+  if (passwordError) return res.status(400).json({ error: passwordError });
+  if (!ACCESS_TOKEN || inviteCode !== ACCESS_TOKEN) {
+    return res.status(403).json({ error: '초대 코드가 올바르지 않습니다.' });
+  }
+
+  const data = loadUsers();
+  const hasAdmin = data.users.some(u => u.username === 'admin');
+  if (!hasAdmin && username !== 'admin') {
+    return res.status(400).json({ error: '첫 번째 사용자는 admin으로 등록해야 합니다.' });
+  }
+  if (data.users.some(u => u.username === username)) {
+    return res.status(409).json({ error: '이미 등록된 사용자 이름입니다.' });
+  }
+
+  const now = new Date().toISOString();
+  const passwordRecord = createPasswordRecord(password);
+  const user = {
+    username,
+    role: isAdminUsername(username) ? 'admin' : 'user',
+    ...passwordRecord,
+    cookieKeySalt: crypto.randomBytes(16).toString('base64'),
+    createdAt: now,
+    lastLoginAt: now,
+    cookieSize: 0,
+    cookieUpdatedAt: null,
+  };
+  data.users.push(user);
+  saveUsers(data);
+  createUserSession(res, user, password);
+  res.json({ ok: true, user: publicUser(user) });
+});
+
+app.post('/api/users/login', (req, res) => {
+  const username = normalizeUsername(req.body.username);
+  const password = String(req.body.password || '');
+  const data = loadUsers();
+  const user = data.users.find(u => u.username === username);
+  if (!user || !verifyPassword(password, user)) {
+    return res.status(401).json({ error: '사용자 이름 또는 비밀번호가 올바르지 않습니다.' });
+  }
+  user.lastLoginAt = new Date().toISOString();
+  saveUsers(data);
+  createUserSession(res, user, password);
+  res.json({ ok: true, user: publicUser(user) });
+});
+
+app.post('/api/users/logout', (req, res) => {
+  const sid = parseCookies(req)[SESSION_COOKIE];
+  if (sid) sessions.delete(sid);
+  res.setHeader('Set-Cookie', clearSessionCookieHeader());
+  res.json({ ok: true });
+});
+
+function requireAdmin(req, res, next) {
+  if (req.user?.username === 'admin') return next();
+  res.status(403).json({ error: '관리자 권한이 필요합니다.' });
+}
+
+app.get('/api/admin/users', userAuthMiddleware, requireAdmin, (req, res) => {
+  const users = loadUsers().users.map(user => ({
+    ...publicUser(user),
+    cookieExists: hasUserCookie(user.username),
+  }));
+  res.json({ users });
+});
+
+app.delete('/api/admin/users/:username', userAuthMiddleware, requireAdmin, (req, res) => {
+  const username = normalizeUsername(req.params.username);
+  if (username === 'admin') return res.status(400).json({ error: 'admin 사용자는 삭제할 수 없습니다.' });
+  const data = loadUsers();
+  const before = data.users.length;
+  data.users = data.users.filter(u => u.username !== username);
+  if (data.users.length === before) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+  saveUsers(data);
+  removeEncryptedUserCookies(username);
+  removeUserSessions(username);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/users/:username/reset-password', userAuthMiddleware, requireAdmin, (req, res) => {
+  const username = normalizeUsername(req.params.username);
+  const password = String(req.body.password || '');
+  const passwordError = validatePassword(password);
+  if (passwordError) return res.status(400).json({ error: passwordError });
+  const data = loadUsers();
+  const user = data.users.find(u => u.username === username);
+  if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+  Object.assign(user, createPasswordRecord(password));
+  user.cookieKeySalt = crypto.randomBytes(16).toString('base64');
+  user.cookieSize = 0;
+  user.cookieUpdatedAt = null;
+  saveUsers(data);
+  removeEncryptedUserCookies(username);
+  removeUserSessions(username);
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/users/:username/cookies', userAuthMiddleware, requireAdmin, (req, res) => {
+  const username = normalizeUsername(req.params.username);
+  removeEncryptedUserCookies(username);
+  res.json({ ok: true });
+});
+
+// ── POST /api/auth ───────────────────────────
+// Legacy endpoint retained so old clients receive a clear migration signal.
 app.post('/api/auth', (req, res) => {
-  if (!ACCESS_TOKEN) return res.json({ ok: true, authRequired: false });
-  const token = (req.body.token || '').trim();
-  if (token === ACCESS_TOKEN) return res.json({ ok: true, authRequired: true });
-  res.status(401).json({ ok: false, authRequired: true, error: '비밀번호가 올바르지 않습니다.' });
+  res.json({ ok: false, authRequired: requiresUserAuth(req), userLoginRequired: true });
 });
 
 // ── GET /api/localip ─────────────────────────
@@ -417,10 +782,12 @@ app.post('/api/info', async (req, res) => {
   ];
 
   const runYtDlp = (withCookies = false) => new Promise((resolve, reject) => {
-    const args = [...BASE_ARGS, ...(withCookies ? cookiesArgs() : []), url];
+    const cookieBundle = withCookies ? requestCookiesArgs(req) : { args: [], cleanup: () => {} };
+    const args = [...BASE_ARGS, ...cookieBundle.args, url];
     execFile(YT_DLP, args,
       { timeout: 90000, maxBuffer: 50 * 1024 * 1024 }, // 50MB — YouTube has many formats
       (err, stdout, stderr) => {
+        cookieBundle.cleanup();
         if (err) {
           console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
           return reject(stderr || err.message);
@@ -493,11 +860,16 @@ app.post('/api/info', async (req, res) => {
         try {
           // If cookies.txt or browser cookies already configured, use them directly
           // without trying to extract from browser (extraction only needed for first-time setup)
-          const existingCookies = cookiesArgs();
-          if (existingCookies.length === 0) {
+          if (!requestHasCookies(req)) {
+            if (requiresUserAuth(req)) {
+              return res.status(400).json({
+                error: '이 계정에 쿠키가 등록되어 있지 않습니다.',
+                needSetup: true,
+              });
+            }
             await extractCookiesViaBrowser();
           } else {
-            console.log('[info] using existing cookies:', existingCookies[0], existingCookies[1] || '');
+            console.log('[info] using configured cookies');
           }
           stdout = await runYtDlp(true); // second attempt with cookies
         } catch (retryErr) {
@@ -559,11 +931,12 @@ app.post('/api/download', (req, res) => {
 
   const isAudioOnly = (format || '').startsWith('bestaudio');
   const isImage     = req.body.mediaType === 'image';
+  const cookieBundle = requestCookiesArgs(req);
   const args = [
     '--no-playlist', '--no-warnings',
     '--retries', '3', '--fragment-retries', '5',
     '--socket-timeout', '30',
-    ...cookiesArgs(),
+    ...cookieBundle.args,
     '-f', format || 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     '-o', outTemplate,
     downloadUrl,
@@ -575,10 +948,16 @@ app.post('/api/download', (req, res) => {
   const proc = spawn(YT_DLP, args);
   let stderr   = '';
   let responded = false;
+  let cookieCleaned = false;
 
   const releaseSlot = () => { activeDownloads = Math.max(0, activeDownloads - 1); };
-  proc.on('close', releaseSlot);
-  proc.on('error', releaseSlot);
+  const cleanupCookieBundle = () => {
+    if (cookieCleaned) return;
+    cookieCleaned = true;
+    cookieBundle.cleanup();
+  };
+  proc.on('close', () => { releaseSlot(); cleanupCookieBundle(); });
+  proc.on('error', () => { releaseSlot(); cleanupCookieBundle(); });
   res.on('close', () => { if (!responded) proc.kill(); });
 
   proc.stderr.on('data', d => { stderr += d.toString(); });
@@ -758,6 +1137,14 @@ app.get('/api/settings/pick-app', (req, res) => {
 
 // ── GET /api/settings/cookies ────────────────
 app.get('/api/settings/cookies', (req, res) => {
+  if (requiresUserAuth(req)) {
+    const user = loadUsers().users.find(u => u.username === req.user?.username);
+    return res.json({
+      path: hasUserCookie(req.user?.username) ? userCookiePath(req.user.username) : null,
+      size: user?.cookieSize || 0,
+      updatedAt: user?.cookieUpdatedAt || null,
+    });
+  }
   ensureEnvCookies();
   if (envCookiesPath && fs.existsSync(envCookiesPath)) return res.json({ path: envCookiesPath });
   const c = loadConfig();
@@ -789,10 +1176,14 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
 
 // ── POST /api/settings/upload-cookies ────────
 // Receive cookies.txt content (text/plain or JSON {content}) and save to disk
-app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '10mb' }), (req, res) => {
+app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb' }), (req, res) => {
   let content = typeof req.body === 'string' ? req.body : (req.body?.content || '');
-  const savePath = path.join(__dirname, 'cookies.txt');
   try {
+    if (requiresUserAuth(req)) {
+      const saved = saveEncryptedUserCookies(req, content);
+      return res.json({ ok: true, path: saved.path, cookieCount: saved.cookieCount, size: saved.size });
+    }
+    const savePath = path.join(__dirname, 'cookies.txt');
     const saved = saveCookiesText(content, savePath);
     res.json({ ok: true, path: saved.path, cookieCount: saved.cookieCount });
   } catch (e) {
@@ -813,6 +1204,10 @@ app.post('/api/settings/auto-cookies', async (req, res) => {
 
 // ── DELETE /api/settings/cookies ─────────────
 app.delete('/api/settings/cookies', (req, res) => {
+  if (requiresUserAuth(req)) {
+    removeEncryptedUserCookies(req.user.username);
+    return res.json({ ok: true });
+  }
   const c = loadConfig();
   delete c.cookiesPath;
   delete c.cookiesBrowser;
@@ -1221,6 +1616,14 @@ app.get('/api/open-chrome', (req, res) => {
   child.unref();
   resizeLatestChromeAppWindow();
   res.json({ ok: true });
+});
+
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ error: '쿠키 파일은 1MB 이하만 등록할 수 있습니다.' });
+  }
+  console.error('[express]', err);
+  res.status(500).json({ error: '서버 오류' });
 });
 
 // ── Start ─────────────────────────────────────

@@ -49,96 +49,191 @@ async function storePhoneFolder(handle) {
   });
 }
 
-// ── Auth ──────────────────────────────────────
-const TOKEN_KEY = 'sns-dl-token';
-
-function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
-
 function apiFetch(url, opts = {}) {
   opts.headers = opts.headers || {};
-  const t = getToken();
-  if (t) opts.headers['x-token'] = t;
+  opts.credentials = opts.credentials || 'same-origin';
   return fetch(url, opts);
 }
 
-async function initAuth() {
-  if (isLocal) return; // no auth on localhost
+// ── Auth ──────────────────────────────────────
+let currentUser = null;
 
-  const stored = getToken();
-  const res = await fetch('/api/auth', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token: stored }),
-  });
+async function initAuth() {
+  const res = await apiFetch('/api/users/me');
   const data = await res.json();
   remoteAuthRequired = !!data.authRequired;
-
-  if (!data.authRequired) return; // server has no token set
-  if (data.ok) return;            // stored token is valid
-
-  // Show auth screen
+  if (!data.authRequired) {
+    updateAuthUI();
+    return;
+  }
+  if (data.user) {
+    currentUser = data.user;
+    updateAuthUI();
+    return;
+  }
   await showAuthScreen();
 }
 
-function showAuthScreen() {
+async function showAuthScreen() {
+  const bootstrap = await (await apiFetch('/api/users/bootstrap')).json();
   return new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.id = 'authOverlay';
-    overlay.innerHTML = `
+    const renderForm = mode => {
+      const isRegister = mode === 'register';
+      overlay.innerHTML = `
       <div style="
         position:fixed;inset:0;background:var(--bg);z-index:9999;
-        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
         padding:32px;
       ">
         <div style="font-size:2rem;font-weight:900;color:var(--text)">SNS</div>
         <div style="font-size:1rem;color:var(--text-sub)">Downloader</div>
-        <p style="color:var(--text-sub);font-size:.9rem;margin-top:8px">비밀번호를 입력하세요</p>
-        <div style="display:flex;gap:8px;width:100%;max-width:280px">
-          <input id="authInput" type="password" placeholder="비밀번호"
-            style="flex:1;padding:10px 14px;border-radius:var(--radius-sm);
-                   border:1px solid var(--border);background:var(--surface);
-                   color:var(--text);font-size:1rem;outline:none"/>
-          <button id="authBtn"
-            style="padding:10px 18px;border-radius:var(--radius-sm);border:none;
-                   background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer;
-                   white-space:nowrap;flex-shrink:0">
-            확인
+        <p style="color:var(--text-sub);font-size:.9rem;margin-top:8px">${isRegister ? '사용자 등록' : '로그인'}</p>
+        <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:320px">
+          <input id="authUsername" type="text" autocomplete="username" placeholder="사용자 이름"
+            value="${bootstrap.needsAdmin && isRegister ? 'admin' : ''}"
+            style="padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:1rem;outline:none"/>
+          <input id="authPassword" type="password" autocomplete="${isRegister ? 'new-password' : 'current-password'}" placeholder="비밀번호"
+            style="padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:1rem;outline:none"/>
+          ${isRegister ? `
+          <input id="authPassword2" type="password" autocomplete="new-password" placeholder="비밀번호 확인"
+            style="padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:1rem;outline:none"/>
+          <input id="authInvite" type="password" placeholder="초대 코드"
+            style="padding:11px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:1rem;outline:none"/>
+          ` : ''}
+          <button id="authBtn" style="padding:11px 18px;border-radius:var(--radius-sm);border:none;background:var(--accent);color:#fff;font-size:.95rem;cursor:pointer">
+            ${isRegister ? '등록' : '로그인'}
+          </button>
+          <button id="authSwitchBtn" style="border:none;background:transparent;color:var(--accent);font-size:.88rem;cursor:pointer">
+            ${isRegister ? '로그인으로 돌아가기' : '사용자 등록'}
           </button>
         </div>
         <p id="authErr" style="color:var(--danger);font-size:.82rem;min-height:1.2em"></p>
       </div>`;
+      const username = document.getElementById('authUsername');
+      const password = document.getElementById('authPassword');
+      const password2 = document.getElementById('authPassword2');
+      const invite = document.getElementById('authInvite');
+      const btn = document.getElementById('authBtn');
+      const switchBtn = document.getElementById('authSwitchBtn');
+      const err = document.getElementById('authErr');
+      username.focus();
+
+      const submit = async () => {
+        err.textContent = '';
+        const body = {
+          username: username.value.trim(),
+          password: password.value,
+        };
+        if (isRegister) {
+          if (password.value !== password2.value) {
+            err.textContent = '비밀번호 확인이 일치하지 않습니다.';
+            return;
+          }
+          body.inviteCode = invite.value.trim();
+        }
+        btn.disabled = true;
+        const r = await apiFetch(isRegister ? '/api/users/register' : '/api/users/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (r.ok && d.user) {
+          currentUser = d.user;
+          updateAuthUI();
+          overlay.remove();
+          resolve();
+          return;
+        }
+        err.textContent = d.error || '처리할 수 없습니다.';
+        btn.disabled = false;
+      };
+
+      btn.addEventListener('click', submit);
+      [username, password, password2, invite].filter(Boolean).forEach(input => {
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+      });
+      switchBtn.addEventListener('click', () => renderForm(isRegister ? 'login' : 'register'));
+    };
     document.body.appendChild(overlay);
+    renderForm(bootstrap.needsAdmin ? 'register' : 'login');
+  });
+}
 
-    const input = document.getElementById('authInput');
-    const btn   = document.getElementById('authBtn');
-    const err   = document.getElementById('authErr');
-    input.focus();
+function updateAuthUI() {
+  const userSec = $('userSection');
+  const userText = $('currentUserText');
+  if (userSec) userSec.style.display = currentUser ? '' : 'none';
+  if (userText && currentUser) userText.textContent = `${currentUser.username} (${currentUser.role === 'admin' ? '관리자' : '사용자'})`;
+  const adminSec = $('adminSection');
+  if (adminSec) adminSec.style.display = currentUser?.username === 'admin' ? '' : 'none';
+}
 
-    const tryAuth = async () => {
-      const token = input.value.trim();
-      if (!token) return;
-      btn.disabled = true;
-      const r = await fetch('/api/auth', {
+async function logoutUser() {
+  await apiFetch('/api/users/logout', { method: 'POST' });
+  currentUser = null;
+  location.reload();
+}
+
+async function changeAdminPassword(username) {
+  const password = prompt(`${username} 새 비밀번호를 입력하세요`);
+  if (!password) return;
+  const r = await apiFetch(`/api/admin/users/${encodeURIComponent(username)}/reset-password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      });
-      const d = await r.json();
-      if (d.ok) {
-        localStorage.setItem(TOKEN_KEY, token);
-        overlay.remove();
-        resolve();
-      } else {
-        err.textContent = d.error || '비밀번호가 올바르지 않습니다.';
-        input.value = '';
-        input.focus();
-        btn.disabled = false;
-      }
-    };
-
-    btn.addEventListener('click', tryAuth);
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') tryAuth(); });
+    body: JSON.stringify({ password }),
   });
+  const d = await r.json();
+  if (!r.ok) return alert(d.error || '비밀번호 초기화 실패');
+  showToast('비밀번호가 초기화되었습니다');
+  await renderAdminUsers();
+}
+
+async function renderAdminUsers() {
+  const box = $('adminUsersList');
+  if (!box) return;
+  try {
+    const r = await apiFetch('/api/admin/users');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '사용자 목록을 불러올 수 없습니다');
+    box.innerHTML = d.users.map(user => `
+      <div class="file-item" style="margin-bottom:8px">
+        <div class="file-info">
+          <div class="file-name">${escHtml(user.username)} ${user.role === 'admin' ? '(관리자)' : ''}</div>
+          <div class="file-meta">최근 접속 ${escHtml(user.lastLoginAt || '-')} · 쿠키 ${user.cookieExists ? formatBytes(user.cookieSize || 0) : '미등록'}</div>
+        </div>
+        <div class="file-actions">
+          <button class="file-action-btn" data-admin-action="reset" data-user="${escHtml(user.username)}">초기화</button>
+          <button class="file-action-btn" data-admin-action="cookies" data-user="${escHtml(user.username)}">쿠키 삭제</button>
+          ${user.username === 'admin' ? '' : `<button class="file-action-btn danger" data-admin-action="delete" data-user="${escHtml(user.username)}">삭제</button>`}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    box.innerHTML = `<p style="color:var(--danger);font-size:.85rem">${escHtml(e.message)}</p>`;
+  }
+}
+
+async function handleAdminAction(action, username) {
+  if (action === 'reset') return changeAdminPassword(username);
+  if (action === 'cookies') {
+    if (!confirm(`${username} 쿠키를 삭제할까요?`)) return;
+    await apiFetch(`/api/admin/users/${encodeURIComponent(username)}/cookies`, { method: 'DELETE' });
+  }
+  if (action === 'delete') {
+    if (!confirm(`${username} 사용자를 삭제할까요?`)) return;
+    await apiFetch(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' });
+  }
+  await renderAdminUsers();
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 // ── Platform detection ──────────────────────
@@ -290,12 +385,21 @@ settingsBtn.addEventListener('click', () => {
   }
   const fwHint = $('androidQrFirewallHint');
   if (fwHint) fwHint.style.display = (isLocal && androidQrTab === 'wifi') ? '' : 'none';
+  if (currentUser?.username === 'admin') renderAdminUsers();
   loadAndroidQR();
 });
 
 settingsClose.addEventListener('click',() => settingsOverlay.classList.remove('open'));
 settingsOverlay.addEventListener('click', e => {
   if (e.target === settingsOverlay) settingsOverlay.classList.remove('open');
+});
+
+$('logoutBtn')?.addEventListener('click', logoutUser);
+$('refreshAdminUsersBtn')?.addEventListener('click', renderAdminUsers);
+$('adminUsersList')?.addEventListener('click', e => {
+  const btn = e.target.closest('[data-admin-action]');
+  if (!btn) return;
+  handleAdminAction(btn.dataset.adminAction, btn.dataset.user);
 });
 
 // ── Theme (persist to localStorage) ──────────
@@ -517,6 +621,10 @@ fetchBtn.addEventListener('click', async () => {
     if (!res.ok) {
       loading.style.display = 'none';
       fetchBtn.style.display = 'block';
+      if (data.needLogin) {
+        await showAuthScreen();
+        return;
+      }
       // Special case: browser is running and SQLite is locked
       if (data.needSetup) {
         showErrorWithSetup(data.error);
@@ -852,11 +960,7 @@ function triggerDownload(blob, filename) {
 }
 
 function withAuthToken(url) {
-  const token = getToken();
-  if (!token) return url;
-  const u = new URL(url, window.location.origin);
-  u.searchParams.set('token', token);
-  return u.pathname + u.search + u.hash;
+  return url;
 }
 
 function withServerParams(url, params = {}) {
@@ -1455,7 +1559,7 @@ async function refreshCookiesUI() {
 }
 
 function canManageCookies() {
-  return isLocal || remoteAuthRequired;
+  return isLocal || !!currentUser;
 }
 
 function updateCookiesVisibility() {

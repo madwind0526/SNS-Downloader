@@ -164,3 +164,21 @@ Chrome 실행 인자에 `--force-device-scale-factor=1`이 있으면 Windows 고
 ### 추가 보정
 
 Chrome app-mode는 URL별 이전 창 크기를 기억할 수 있다. 같은 `--window-size`를 전달해도 PC/Render 창 크기가 다르면, Chrome 실행 직후 Windows API `MoveWindow`로 최신 `SNS Downloader` 창을 공통 크기에 맞춘다.
+
+## Render 공용 쿠키가 사용자 간에 덮어써짐
+
+### 증상
+
+- A가 Render에 쿠키를 등록한 뒤 사용 중인데 B가 새 쿠키를 등록하면 이후 A도 B 쿠키로 다운로드한다.
+
+### 원인
+
+기존 Render 쿠키 저장소가 서버 전체 공용 `cookies.txt` 1개였기 때문이다.
+
+### 해결
+
+1. Render/Linux API는 username/password 로그인 세션을 요구한다.
+2. 쿠키는 `server/data/cookies/{username}.enc`에 사용자별로 저장한다.
+3. 쿠키 파일은 로그인 password에서 파생한 key로 AES-256-GCM 암호화한다.
+4. 다운로드 직전에만 복호화해 임시 `cookies.txt`를 만들고 yt-dlp 종료 후 삭제한다.
+5. 쿠키 업로드는 1MB 초과 시 거부한다.

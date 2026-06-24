@@ -12,4 +12,6 @@ cookies.*
 _picker_tmp.ps1
 .env
 server/config.json
+server/data/
+*.enc
 code-review.md
