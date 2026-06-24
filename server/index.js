@@ -20,14 +20,24 @@ const PORT = process.env.PORT || 3001;
 // Empty / unset = no auth (local PC use).
 const ACCESS_TOKEN = (process.env.ACCESS_TOKEN || '').trim();
 
+function isLocalhostRequest(req) {
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  return process.platform === 'win32' &&
+    ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(ip);
+}
+
 function authMiddleware(req, res, next) {
   if (!ACCESS_TOKEN) return next(); // auth disabled (no token configured)
-  // Requests from localhost always pass — PC local use
-  const ip = req.ip || req.socket?.remoteAddress || '';
-  if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+  // Requests from Windows localhost always pass for PC local use.
+  if (isLocalhostRequest(req)) return next();
   const token = req.headers['x-token'] || req.query.token;
   if (token === ACCESS_TOKEN) return next();
   res.status(401).json({ error: '인증이 필요합니다.', needAuth: true });
+}
+
+function cookieSettingsGuard(req, res, next) {
+  if (ACCESS_TOKEN || isLocalhostRequest(req)) return next();
+  res.status(403).json({ error: 'Render에서 쿠키 설정을 사용하려면 서버에 비밀번호 보호가 필요합니다.' });
 }
 
 // ── Rate limiting (Render only — no token = local, skip) ─
@@ -60,6 +70,10 @@ const YT_DLP = process.platform === 'win32'
 
 // Simple server-side config (cookies path, etc.)
 const CONFIG_FILE = path.join(__dirname, 'config.json');
+const RUNTIME_COOKIES_FILE = path.join(os.tmpdir(), 'sns-downloader-cookies.txt');
+let envCookiesChecked = false;
+let envCookiesPath = null;
+
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
 }
@@ -67,8 +81,66 @@ function saveConfig(data) {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
 }
 
+function normalizeCookiesText(content) {
+  const text = String(content || '');
+  if (text.includes('\\n') && !text.includes('\n')) return text.replace(/\\n/g, '\n');
+  return text;
+}
+
+function isValidCookiesText(content) {
+  return content.includes('# Netscape HTTP Cookie File') || content.split(/\r?\n/).some(line => line.includes('\t'));
+}
+
+function saveCookiesText(content, savePath) {
+  const normalized = normalizeCookiesText(content);
+  if (!isValidCookiesText(normalized)) {
+    const err = new Error('유효한 cookies.txt 파일이 아닙니다.\n"Get cookies.txt LOCALLY" 확장 프로그램으로 내보낸 파일을 사용하세요.');
+    err.statusCode = 400;
+    throw err;
+  }
+  fs.writeFileSync(savePath, normalized, 'utf8');
+  const c = loadConfig();
+  c.cookiesPath = savePath;
+  delete c.cookiesBrowser;
+  saveConfig(c);
+  return {
+    path: savePath,
+    cookieCount: normalized.split('\n').filter(l => l.trim() && !l.startsWith('#')).length,
+  };
+}
+
+function ensureEnvCookies() {
+  if (envCookiesChecked) return;
+  envCookiesChecked = true;
+
+  const configuredPath = (process.env.COOKIES_PATH || '').trim();
+  if (configuredPath && fs.existsSync(configuredPath)) {
+    envCookiesPath = configuredPath;
+    const c = loadConfig();
+    c.cookiesPath = configuredPath;
+    delete c.cookiesBrowser;
+    saveConfig(c);
+    return;
+  }
+
+  const base64 = (process.env.COOKIES_BASE64 || process.env.COOKIES_TXT_BASE64 || '').trim();
+  const rawText = process.env.COOKIES_TEXT || process.env.COOKIES_TXT || '';
+  if (!base64 && !rawText) return;
+
+  try {
+    const content = base64 ? Buffer.from(base64, 'base64').toString('utf8') : rawText;
+    const saved = saveCookiesText(content, RUNTIME_COOKIES_FILE);
+    envCookiesPath = saved.path;
+    console.log('[cookies] loaded from environment');
+  } catch (e) {
+    console.error('[cookies] environment cookie load failed:', e.message);
+  }
+}
+
 // Returns cookies args for yt-dlp — file mode or browser mode
 function cookiesArgs() {
+  ensureEnvCookies();
+  if (envCookiesPath && fs.existsSync(envCookiesPath)) return ['--cookies', envCookiesPath];
   const c = loadConfig();
   if (c.cookiesPath && fs.existsSync(c.cookiesPath)) return ['--cookies', c.cookiesPath];
   if (c.cookiesBrowser) return ['--cookies-from-browser', c.cookiesBrowser];
@@ -255,6 +327,13 @@ app.use('/api', (req, res, next) => {
 });
 app.use('/api/info',     apiLimiter);
 app.use('/api/download', downloadLimiter);
+app.use([
+  '/api/settings/cookies',
+  '/api/settings/upload-cookies',
+  '/api/settings/pick-cookies-file',
+  '/api/settings/auto-cookies',
+  '/api/settings/pick-cookies',
+], cookieSettingsGuard);
 
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
@@ -468,9 +547,7 @@ app.post('/api/download', (req, res) => {
   console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title} active=${activeDownloads + 1}`);
 
   // Detect if request came from the local PC browser (vs WiFi phone or Render)
-  const clientIp = req.ip || req.socket?.remoteAddress || '';
-  const isLocalhostReq = process.platform === 'win32' &&
-    ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(clientIp);
+  const isLocalhostReq = isLocalhostRequest(req);
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
@@ -681,8 +758,11 @@ app.get('/api/settings/pick-app', (req, res) => {
 
 // ── GET /api/settings/cookies ────────────────
 app.get('/api/settings/cookies', (req, res) => {
+  ensureEnvCookies();
+  if (envCookiesPath && fs.existsSync(envCookiesPath)) return res.json({ path: envCookiesPath });
   const c = loadConfig();
-  res.json({ path: c.cookiesPath || null });
+  const hasFile = !!(c.cookiesPath && fs.existsSync(c.cookiesPath));
+  res.json({ path: hasFile ? c.cookiesPath : null });
 });
 
 // ── GET /api/settings/pick-cookies-file ──────
@@ -711,20 +791,12 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
 // Receive cookies.txt content (text/plain or JSON {content}) and save to disk
 app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '10mb' }), (req, res) => {
   let content = typeof req.body === 'string' ? req.body : (req.body?.content || '');
-  if (!content.includes('# Netscape HTTP Cookie File') && !content.includes('\t')) {
-    return res.status(400).json({ error: '유효한 cookies.txt 파일이 아닙니다.\n"Get cookies.txt LOCALLY" 확장 프로그램으로 내보낸 파일을 사용하세요.' });
-  }
   const savePath = path.join(__dirname, 'cookies.txt');
   try {
-    fs.writeFileSync(savePath, content, 'utf8');
-    const c = loadConfig();
-    c.cookiesPath = savePath;
-    delete c.cookiesBrowser;
-    saveConfig(c);
-    const lineCount = content.split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
-    res.json({ ok: true, path: savePath, cookieCount: lineCount });
+    const saved = saveCookiesText(content, savePath);
+    res.json({ ok: true, path: saved.path, cookieCount: saved.cookieCount });
   } catch (e) {
-    res.status(500).json({ error: '파일 저장 실패: ' + e.message });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : '파일 저장 실패: ' + e.message });
   }
 });
 
@@ -743,7 +815,12 @@ app.post('/api/settings/auto-cookies', async (req, res) => {
 app.delete('/api/settings/cookies', (req, res) => {
   const c = loadConfig();
   delete c.cookiesPath;
+  delete c.cookiesBrowser;
   saveConfig(c);
+  if (envCookiesPath === RUNTIME_COOKIES_FILE) {
+    try { fs.unlinkSync(RUNTIME_COOKIES_FILE); } catch {}
+  }
+  envCookiesPath = null;
   res.json({ ok: true });
 });
 
@@ -1082,8 +1159,45 @@ function cleanup(sessionId) {
   } catch {}
 }
 
+const CHROME_APP_WINDOW = { width: 560, height: 920 };
+
+function resizeLatestChromeAppWindow() {
+  if (process.platform !== 'win32') return;
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+Start-Sleep -Milliseconds 900
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32 {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+  [DllImport("user32.dll")]
+  public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+  [DllImport("user32.dll")]
+  public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+}
+"@
+$p = Get-Process chrome | Where-Object { $_.MainWindowTitle -like '*SNS Downloader*' } | Sort-Object StartTime -Descending | Select-Object -First 1
+if ($p -and $p.MainWindowHandle -ne 0) {
+  $r = New-Object Win32+RECT
+  [Win32]::GetWindowRect($p.MainWindowHandle, [ref]$r) | Out-Null
+  [Win32]::MoveWindow($p.MainWindowHandle, $r.Left, $r.Top, ${CHROME_APP_WINDOW.width}, ${CHROME_APP_WINDOW.height}, $true) | Out-Null
+}
+`;
+  execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    timeout: 5000,
+    windowsHide: true,
+  }, () => {});
+}
+
 // ── GET /api/open-chrome ─────────────────────
-// Spawn a new Chrome app-mode window for the PC platform button
+// Spawn a new Chrome app-mode window for the PC platform button.
 app.get('/api/open-chrome', (req, res) => {
   if (process.platform !== 'win32') return res.json({ ok: false, reason: 'windows-only' });
   const localData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
@@ -1099,13 +1213,13 @@ app.get('/api/open-chrome', (req, res) => {
     : `http://localhost:${PORT}/?mode=app`;
   const child = spawn(chromePath, [
     `--app=${target}`,
-    '--window-size=420,820',
-    '--force-device-scale-factor=1',
+    `--window-size=${CHROME_APP_WINDOW.width},${CHROME_APP_WINDOW.height}`,
     '--new-window',
   ], {
     detached: true, stdio: 'ignore',
   });
   child.unref();
+  resizeLatestChromeAppWindow();
   res.json({ ok: true });
 });
 

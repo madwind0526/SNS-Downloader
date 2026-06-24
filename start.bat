@@ -26,4 +26,4 @@ if not defined CHROME (
   goto :eof
 )
 
-start "" "%CHROME%" "--app=http://localhost:3001/?mode=app" --window-size=420,820
+start "" "%CHROME%" "--app=http://localhost:3001/?mode=app" --window-size=560,920

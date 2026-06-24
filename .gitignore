@@ -7,6 +7,8 @@ crash.log
 *.log
 *.part
 *.txt
+cookies.*
+**/cookies.*
 _picker_tmp.ps1
 .env
 server/config.json

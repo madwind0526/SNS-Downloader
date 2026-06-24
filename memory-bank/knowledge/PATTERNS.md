@@ -146,5 +146,24 @@ https://sns-downloader.onrender.com/api/version
 Expected JSON:
 
 ```json
-{"version":"1.10","platform":"linux"}
+{"version":"1.13","platform":"linux"}
+```
+
+## Render Cookies From Environment
+
+Render runtime files can disappear after restart or redeploy. For persistent server-side yt-dlp cookies, load cookies from an environment variable at runtime and pass the materialized file to yt-dlp.
+
+Supported environment variables:
+
+- `COOKIES_BASE64` or `COOKIES_TXT_BASE64`: base64 encoded `cookies.txt`
+- `COOKIES_TEXT` or `COOKIES_TXT`: raw or escaped-newline `cookies.txt`
+- `COOKIES_PATH`: path to an existing cookies file
+
+Pattern:
+
+```js
+const RUNTIME_COOKIES_FILE = path.join(os.tmpdir(), 'sns-downloader-cookies.txt');
+const content = Buffer.from(process.env.COOKIES_BASE64, 'base64').toString('utf8');
+fs.writeFileSync(RUNTIME_COOKIES_FILE, content, 'utf8');
+ytDlpArgs.push('--cookies', RUNTIME_COOKIES_FILE);
 ```

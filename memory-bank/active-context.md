@@ -2,10 +2,12 @@
 
 ## Current Focus
 
-- SNS Downloader v1.10 안정화 완료.
-- Render mode와 Phone via PC mode의 폰 저장 흐름을 서버 준비 파일 + 브라우저 네이티브 다운로드 URL 방식으로 정리.
-- 성공 화면 미리보기는 서버 파일 URL `?preview=1`과 Range 요청으로 복구.
-- README와 memory-bank 최신화 진행.
+- SNS Downloader v1.13 PC/Render Chrome app window 크기 동기화 완료.
+- PC/Mobile 선택으로 열리는 app window는 `560,920` 크기로 열리고, Windows `MoveWindow`로 한 번 더 보정된다.
+- Chrome 실행 인자에서 `--force-device-scale-factor=1`을 제거했다.
+- Render에서 쿠키 UI는 `ACCESS_TOKEN`이 설정된 보호 서버일 때만 표시된다.
+- Render 재시작/재배포 후 쿠키 복원은 `COOKIES_BASE64` 또는 `COOKIES_TEXT` 환경변수를 사용한다.
+- 다음 배포 후 `https://sns-downloader.onrender.com/api/version`이 `1.13`인지 확인한다.
 
 ## Current Behavior
 

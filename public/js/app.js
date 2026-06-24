@@ -8,6 +8,7 @@ const PHONE_FOLDER_DB = 'sns-downloader-folder';
 const PHONE_FOLDER_STORE = 'handles';
 const PHONE_FOLDER_KEY = 'phone-folder';
 const PHONE_DEFAULT_PATH = '/storage/emulated/0/Documents/SNS-Downloader';
+let remoteAuthRequired = false;
 
 function canUsePhoneFolderPicker() {
   return window.isSecureContext && typeof window.showDirectoryPicker === 'function';
@@ -70,6 +71,7 @@ async function initAuth() {
     body: JSON.stringify({ token: stored }),
   });
   const data = await res.json();
+  remoteAuthRequired = !!data.authRequired;
 
   if (!data.authRequired) return; // server has no token set
   if (data.ok) return;            // stored token is valid
@@ -312,7 +314,7 @@ document.querySelectorAll('[data-theme-btn]').forEach(btn => {
 });
 
 // ── App init ─────────────────────────────────
-initAuth().catch(() => {}); // show auth screen before anything else (no-op on localhost)
+const authReady = initAuth().catch(() => {}); // show auth screen before anything else (no-op on localhost)
 
 // ── Version ───────────────────────────────────
 fetch('/api/version').then(r => r.json()).then(d => {
@@ -356,7 +358,7 @@ $('platformPC')?.addEventListener('click', async () => {
     if (d.ok) return;
   } catch {}
   // Fallback: window.open with extra height to compensate for browser chrome
-  const w = 420, h = 870;
+  const w = 560, h = 920;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -374,7 +376,7 @@ $('platformAndroid')?.addEventListener('click', async () => {
     if (d.ok) return;
   } catch {}
 
-  const w = 420, h = 870;
+  const w = 560, h = 920;
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
@@ -1421,6 +1423,8 @@ if (isLocal) setupPCServerUI();
 // ── Cookies ───────────────────────────────────
 async function refreshCookiesUI() {
   try {
+    await authReady;
+    updateCookiesVisibility();
     const d = await (await apiFetch('/api/settings/cookies')).json();
     const active = !!d.path;
 
@@ -1448,6 +1452,18 @@ async function refreshCookiesUI() {
     if (sClr)  sClr.style.display = active ? '' : 'none';
     if (sDrop) sDrop.style.display = active ? 'none' : '';
   } catch {}
+}
+
+function canManageCookies() {
+  return isLocal || remoteAuthRequired;
+}
+
+function updateCookiesVisibility() {
+  const visible = canManageCookies();
+  const cookiesSec = $('cookiesSection');
+  if (cookiesSec) cookiesSec.style.display = visible ? '' : 'none';
+  const cookieBtn = $('cookieHeaderBtn');
+  if (cookieBtn) cookieBtn.style.display = visible ? '' : 'none';
 }
 
 async function uploadCookiesText(text) {
@@ -1485,6 +1501,10 @@ async function pickCookiesNative() {
 }
 
 function openCookieModal()  {
+  if (!canManageCookies()) {
+    alert('Render에서 쿠키 설정을 사용하려면 서버에 비밀번호 보호가 필요합니다.');
+    return;
+  }
   $('cookieModalOverlay').style.display = 'flex';
 }
 function closeCookieModal() {
@@ -1533,7 +1553,7 @@ $('cookieModalFileInput')?.addEventListener('change', e => {
   if (file) uploadCookiesFile(file);
 });
 $('cookieModalClearBtn')?.addEventListener('click', async () => {
-  await fetch('/api/settings/cookies', { method: 'DELETE' });
+  await apiFetch('/api/settings/cookies', { method: 'DELETE' });
   refreshCookiesUI();
 });
 
@@ -1558,21 +1578,14 @@ $('cookiesFileInput')?.addEventListener('change', e => {
   if (file) uploadCookiesFile(file);
 });
 $('cookiesClearBtn')?.addEventListener('click', async () => {
-  await fetch('/api/settings/cookies', { method: 'DELETE' });
+  await apiFetch('/api/settings/cookies', { method: 'DELETE' });
   refreshCookiesUI();
 });
-
-// Hide cookies UI when not local
-if (!isLocal) {
-  const cookiesSec = $('cookiesSection');
-  if (cookiesSec) cookiesSec.style.display = 'none';
-  const cookieBtn = $('cookieHeaderBtn');
-  if (cookieBtn) cookieBtn.style.display = 'none';
-}
 
 // Open cookie modal from error button
 window.openCookieModal = openCookieModal;
 
+updateCookiesVisibility();
 refreshCookiesUI();
 
 // ── Platform table links — force new window ──
