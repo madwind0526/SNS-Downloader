@@ -2,14 +2,14 @@
 
 ## Current Wave
 
-- **Wave:** 8
+- **Wave:** 9
 - **Status:** Completed
 - **Cache Status:** CLEAN
-- **Last Checkpoint:** v1.14 user-scoped Render cookies completed (2026-06-25)
+- **Last Checkpoint:** v1.15 Tumblr cookie retry fix completed (2026-06-25)
 
 ## Version
 
-- Current app version: `1.14`
+- Current app version: `1.15`
 - Local server: `http://localhost:3001`
 - Render server: `https://sns-downloader.onrender.com`
 
@@ -25,6 +25,7 @@
 | 6 | Chrome app window size and high-DPI scale fix | Completed | 2026-06-25 |
 | 7 | PC/Render Chrome app window size sync with MoveWindow fallback | Completed | 2026-06-25 |
 | 8 | Render username/password login, admin UI, encrypted per-user cookies | Completed | 2026-06-25 |
+| 9 | Retry yt-dlp with registered cookies on Tumblr no-video errors | Completed | 2026-06-25 |
 
 ## Session Notes
 
@@ -41,3 +42,4 @@
 - 2026-06-25: Increased Chrome app window size to `560,920` and removed `--force-device-scale-factor=1` to avoid tiny UI on high-DPI Windows displays.
 - 2026-06-25: Added Windows `MoveWindow` correction after Chrome app-mode launch so PC and Render app windows use the same outer size even when Chrome remembers per-URL bounds.
 - 2026-06-25: Added Render user login. `ACCESS_TOKEN` is now an invite code, `admin` is the only admin username, and Render cookies are encrypted per user with a 1MB upload limit.
+- 2026-06-25: Fixed Tumblr cookie retry. Registered cookies are now retried for no-video yt-dlp errors, not only explicit login errors.

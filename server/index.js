@@ -848,15 +848,22 @@ app.post('/api/info', async (req, res) => {
       String(t || '').includes('로그인');
   };
 
+  const isNoVideoError = t => {
+    const s = String(t || '').toLowerCase();
+    return s.includes('no video could be found') ||
+      s.includes('no video') ||
+      s.includes('no video formats found');
+  };
+
   try {
     // First attempt — no cookies (avoids format conflicts for public content)
     let stdout;
     try {
       stdout = await runYtDlp(false);
     } catch (errText) {
-      // Retry with cookies on login error
-      if (isLoginError(errText)) {
-        console.log('[info] login required — retrying with cookies...');
+      const shouldRetryWithCookies = isLoginError(errText) || (isNoVideoError(errText) && requestHasCookies(req));
+      if (shouldRetryWithCookies) {
+        console.log('[info] retrying with cookies...');
         try {
           // If cookies.txt or browser cookies already configured, use them directly
           // without trying to extract from browser (extraction only needed for first-time setup)
@@ -881,8 +888,7 @@ app.post('/api/info', async (req, res) => {
             browser: retryErr.browser || null,
           });
         }
-      } else if (errText.includes('No video could be found') || errText.includes('no video') ||
-                 errText.includes('No video formats found')) {
+      } else if (isNoVideoError(errText)) {
         const images = await extractImagesFromPage(url);
         if (images.length) return res.json({ items: images });
         if (errText.includes('[Tumblr]'))   return res.status(400).json({ error: 'Tumblr 이미지 포스트는 지원되지 않습니다.' });

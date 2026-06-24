@@ -182,3 +182,17 @@ Chrome app-mode는 URL별 이전 창 크기를 기억할 수 있다. 같은 `--w
 3. 쿠키 파일은 로그인 password에서 파생한 key로 AES-256-GCM 암호화한다.
 4. 다운로드 직전에만 복호화해 임시 `cookies.txt`를 만들고 yt-dlp 종료 후 삭제한다.
 5. 쿠키 업로드는 1MB 초과 시 거부한다.
+
+## Tumblr 쿠키 필요 영상이 no-video 오류로 실패
+
+### 증상
+
+- PC Local에서는 Tumblr 영상이 보이지만 Render에서는 쿠키 등록 후에도 `Tumblr 이미지 포스트는 지원되지 않습니다.` 또는 no-video 계열 오류가 난다.
+
+### 원인
+
+Tumblr/yt-dlp가 쿠키 필요 상황을 `login required`가 아니라 `No video could be found` 또는 `No video formats found`로 반환할 수 있다. 기존 서버는 로그인 오류에서만 쿠키 재시도를 해서 등록된 쿠키를 쓰기 전에 fallback 오류로 빠졌다.
+
+### 해결
+
+쿠키가 등록된 요청이면 no-video 계열 오류에서도 yt-dlp를 쿠키로 한 번 더 재시도한다.
