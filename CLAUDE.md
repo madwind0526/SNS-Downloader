@@ -91,6 +91,14 @@ This applies to:
 
 UI strings (user-visible text in HTML) remain in Korean as-is.
 
+## PowerShell Encoding
+
+- This project may be used from Windows PowerShell 5.1.
+- When reading or writing Korean Markdown documents in Windows PowerShell 5.1, explicitly use UTF-8:
+  - Read: `Get-Content README.md -Encoding UTF8`
+  - Write: `Set-Content README.md -Value $text -Encoding UTF8`
+- PowerShell 7+ handles UTF-8 defaults better, but commands should remain compatible with Windows PowerShell 5.1 unless the project explicitly changes that requirement.
+
 ## Key Conventions
 
 - UI 텍스트는 한국어
