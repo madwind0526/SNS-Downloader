@@ -2,14 +2,14 @@
 
 ## Current Wave
 
-- **Wave:** 14
+- **Wave:** 15
 - **Status:** Completed
 - **Cache Status:** CLEAN
-- **Last Checkpoint:** v1.20 Tumblr cookie retry diagnostics improved (2026-06-25)
+- **Last Checkpoint:** v1.21 Cookie-first info requests completed (2026-06-25)
 
 ## Version
 
-- Current app version: `1.20`
+- Current app version: `1.21`
 - Local server: `http://localhost:3001`
 - Render server: `https://sns-downloader.onrender.com`
 
@@ -31,6 +31,7 @@
 | 12 | Postgres-backed Render user and encrypted cookie persistence | Completed | 2026-06-25 |
 | 13 | Safe Render storage diagnostics endpoint | Completed | 2026-06-25 |
 | 14 | Tumblr no-video cookie retry diagnostics | Completed | 2026-06-25 |
+| 15 | Cookie-first Render info requests | Completed | 2026-06-25 |
 
 ## Session Notes
 
@@ -53,3 +54,4 @@
 - 2026-06-25: Added optional `DATABASE_URL` Postgres storage for Render users and encrypted per-user cookies, with file fallback and one-time file-to-DB migration when DB is empty.
 - 2026-06-25: Added `/api/storage/status` to distinguish file fallback from Postgres storage without exposing secrets.
 - 2026-06-25: Added safe `/api/info` diagnostics for Tumblr no-video failures after cookie retry.
+- 2026-06-25: Changed `/api/info` so registered cookies are used on the first yt-dlp attempt instead of starting cookie-less.

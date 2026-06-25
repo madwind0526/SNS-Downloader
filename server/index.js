@@ -1149,15 +1149,17 @@ app.post('/api/info', async (req, res) => {
   };
 
   try {
-    // First attempt — no cookies (avoids format conflicts for public content)
+    const initialHasCookies = await requestHasCookies(req);
     let stdout;
     try {
-      stdout = await runYtDlp(false);
+      stdout = await runYtDlp(initialHasCookies);
     } catch (errText) {
-      const hasCookies = await requestHasCookies(req);
+      const hasCookies = initialHasCookies || await requestHasCookies(req);
       const firstErrorKind = errorKind(errText);
-      const shouldRetryWithCookies = isLoginError(errText) ||
-        ((isNoVideoError(errText) || isRateLimitedError(errText)) && hasCookies);
+      const shouldRetryWithCookies = !initialHasCookies && (
+        isLoginError(errText) ||
+        ((isNoVideoError(errText) || isRateLimitedError(errText)) && hasCookies)
+      );
       if (shouldRetryWithCookies) {
         console.log('[info] retrying with cookies...');
         try {
@@ -1210,6 +1212,20 @@ app.post('/api/info', async (req, res) => {
       } else if (isNoVideoError(errText)) {
         const images = await extractImagesFromPage(url);
         if (images.length) return res.json({ items: images });
+        if (initialHasCookies && isTumblrUrl(url)) {
+          const userCookie = requiresUserAuth(req) ? await userCookieStatus(req) : null;
+          return res.status(400).json({
+            error: '쿠키를 사용했지만 Tumblr가 이 포스트의 동영상을 반환하지 않았습니다. Tumblr에 로그인된 cookies.txt인지 확인하거나 PC mode / Phone via PC로 시도하세요.',
+            diagnostics: {
+              firstErrorKind,
+              retriedWithCookies: false,
+              initialWithCookies: true,
+              cookieExists: !!userCookie?.exists,
+              cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
+              cookieCount: userCookie?.cookieCount || 0,
+            },
+          });
+        }
         if (errText.includes('[Tumblr]'))   return res.status(400).json({ error: 'Tumblr 이미지 포스트는 지원되지 않습니다.' });
         if (errText.includes('[Pinterest]')) return res.status(400).json({ error: 'Pinterest 이미지 핀은 지원되지 않습니다.' });
         return res.status(400).json({ error: '이 포스트에서 미디어를 찾을 수 없습니다.' });
