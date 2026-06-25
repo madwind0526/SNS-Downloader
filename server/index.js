@@ -296,6 +296,32 @@ function decryptUserCookiesFile(username, key) {
   ]).toString('utf8');
 }
 
+function countCookieLines(content) {
+  return String(content || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
+}
+
+function userCookieStatus(req) {
+  const username = req.user?.username;
+  const user = loadUsers().users.find(u => u.username === username);
+  const exists = !!(username && hasUserCookie(username));
+  const status = {
+    exists,
+    size: user?.cookieSize || 0,
+    updatedAt: user?.cookieUpdatedAt || null,
+    decryptOk: false,
+    cookieCount: 0,
+  };
+  if (!exists || !req.session?.cookieKey) return status;
+  try {
+    const content = decryptUserCookiesFile(username, req.session.cookieKey);
+    status.decryptOk = true;
+    status.cookieCount = countCookieLines(content);
+  } catch (e) {
+    status.error = '쿠키 복호화 실패';
+  }
+  return status;
+}
+
 function saveEncryptedUserCookies(req, content) {
   if (!req.session?.cookieKey || !req.user?.username) {
     const err = new Error('로그인이 필요합니다.');
@@ -316,7 +342,7 @@ function saveEncryptedUserCookies(req, content) {
   }
   return {
     path: userCookiePath(req.user.username),
-    cookieCount: normalized.split('\n').filter(l => l.trim() && !l.startsWith('#')).length,
+    cookieCount: countCookieLines(normalized),
     size,
   };
 }
@@ -341,6 +367,7 @@ function requestCookiesArgs(req) {
   const tempPath = path.join(os.tmpdir(), `sns-dl-cookies-${req.user.username}-${crypto.randomBytes(8).toString('hex')}.txt`);
   const content = decryptUserCookiesFile(req.user.username, req.session.cookieKey);
   fs.writeFileSync(tempPath, content, 'utf8');
+  console.log(`[cookies] using user cookies username=${req.user.username} count=${countCookieLines(content)}`);
   return {
     args: ['--cookies', tempPath],
     cleanup: () => { try { fs.unlinkSync(tempPath); } catch {} },
@@ -1144,11 +1171,9 @@ app.get('/api/settings/pick-app', (req, res) => {
 // ── GET /api/settings/cookies ────────────────
 app.get('/api/settings/cookies', (req, res) => {
   if (requiresUserAuth(req)) {
-    const user = loadUsers().users.find(u => u.username === req.user?.username);
     return res.json({
       path: hasUserCookie(req.user?.username) ? userCookiePath(req.user.username) : null,
-      size: user?.cookieSize || 0,
-      updatedAt: user?.cookieUpdatedAt || null,
+      ...userCookieStatus(req),
     });
   }
   ensureEnvCookies();
@@ -1187,6 +1212,7 @@ app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb
   try {
     if (requiresUserAuth(req)) {
       const saved = saveEncryptedUserCookies(req, content);
+      console.log(`[cookies] uploaded username=${req.user.username} size=${saved.size} count=${saved.cookieCount}`);
       return res.json({ ok: true, path: saved.path, cookieCount: saved.cookieCount, size: saved.size });
     }
     const savePath = path.join(__dirname, 'cookies.txt');

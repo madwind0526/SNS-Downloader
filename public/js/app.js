@@ -1531,18 +1531,21 @@ async function refreshCookiesUI() {
     updateCookiesVisibility();
     const d = await (await apiFetch('/api/settings/cookies')).json();
     const active = !!d.path;
+    const cookieLabel = active
+      ? (d.decryptOk === false && !isLocal ? '쿠키 오류 — 다시 등록 필요' : `쿠키 등록됨${d.cookieCount ? ` (${d.cookieCount}개)` : ''}`)
+      : '미등록';
 
     // Header dot
     const hDot = $('cookieHeaderDot');
-    if (hDot) hDot.className = 'cookie-dot ' + (active ? 'active' : 'inactive');
+    if (hDot) hDot.className = 'cookie-dot ' + (active && d.decryptOk !== false ? 'active' : 'inactive');
 
     // Modal status
     const mDot  = $('cookieModalDot');
     const mText = $('cookieModalStatusText');
     const mClr  = $('cookieModalClearBtn');
     const mDrop = $('cookieModalDrop');
-    if (mDot)  mDot.className = 'cookies-dot ' + (active ? 'active' : 'inactive');
-    if (mText) mText.textContent = active ? '쿠키 등록됨 — 로그인 필요 사이트 자동 인증' : '미등록';
+    if (mDot)  mDot.className = 'cookies-dot ' + (active && d.decryptOk !== false ? 'active' : 'inactive');
+    if (mText) mText.textContent = active ? `${cookieLabel} — 로그인 필요 사이트 자동 인증` : '미등록';
     if (mClr)  mClr.style.display = active ? '' : 'none';
     if (mDrop) mDrop.style.display = active ? 'none' : '';
 
@@ -1551,8 +1554,8 @@ async function refreshCookiesUI() {
     const sText = $('cookiesStatusText');
     const sClr  = $('cookiesClearBtn');
     const sDrop = $('cookiesDropZone');
-    if (sDot)  sDot.className = 'cookies-dot ' + (active ? 'active' : 'inactive');
-    if (sText) sText.textContent = active ? '쿠키 등록됨' : '미등록';
+    if (sDot)  sDot.className = 'cookies-dot ' + (active && d.decryptOk !== false ? 'active' : 'inactive');
+    if (sText) sText.textContent = cookieLabel;
     if (sClr)  sClr.style.display = active ? '' : 'none';
     if (sDrop) sDrop.style.display = active ? 'none' : '';
   } catch {}

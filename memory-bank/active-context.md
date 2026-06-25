@@ -2,13 +2,14 @@
 
 ## Current Focus
 
-- SNS Downloader v1.15 Tumblr 쿠키 재시도 수정 완료.
+- SNS Downloader v1.16 Render 쿠키 상태 진단 추가 완료.
+- `/api/users/bootstrap`이 `needsAdmin:true`이면 Render 런타임 `server/data/`가 reset되어 admin/user 재등록이 필요한 상태다.
+- 쿠키 상태 API는 `decryptOk`, `cookieCount`, `size`, `updatedAt`을 반환하되 쿠키 값은 노출하지 않는다.
 - 쿠키가 등록된 요청은 `No video could be found` 계열 오류에서도 yt-dlp를 쿠키로 한 번 더 재시도한다.
 - Render/Linux는 username/password 로그인 세션이 필요하며 `ACCESS_TOKEN`은 사용자 등록 초대 코드로만 사용한다.
 - username이 정확히 `admin`인 사용자만 관리자이며, 일반 사용자 이름에는 `admin` 포함 금지.
 - Render 쿠키는 사용자별 AES-GCM 암호화 파일 `server/data/cookies/{username}.enc`로 저장되고 1MB 초과 업로드는 거부된다.
-- PC/Mobile 선택으로 열리는 app window는 `560,920` 크기로 열리고, Windows `MoveWindow`로 한 번 더 보정된다.
-- 다음 배포 후 `https://sns-downloader.onrender.com/api/version`이 `1.15`인지 확인한다.
+- 다음 배포 후 `https://sns-downloader.onrender.com/api/version`이 `1.16`인지 확인한다.
 
 ## Current Behavior
 

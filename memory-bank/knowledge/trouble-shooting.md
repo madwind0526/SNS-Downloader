@@ -196,3 +196,18 @@ Tumblr/yt-dlp가 쿠키 필요 상황을 `login required`가 아니라 `No video
 ### 해결
 
 쿠키가 등록된 요청이면 no-video 계열 오류에서도 yt-dlp를 쿠키로 한 번 더 재시도한다.
+
+## Render 사용자와 쿠키가 배포 후 초기화됨
+
+### 증상
+
+- Render Server mode 접속 시 이전에 만든 admin/user가 없어지고 다시 사용자 등록 화면이 나온다.
+- `/api/users/bootstrap`이 `needsAdmin:true`를 반환한다.
+
+### 원인
+
+Render 기본 파일시스템은 ephemeral이다. `server/data/users.json`과 `server/data/cookies/*.enc`에 저장한 런타임 데이터는 deploy/restart 후 사라질 수 있다.
+
+### 해결
+
+Free 테스트에서는 deploy 후 admin 등록과 쿠키 업로드를 다시 진행한다. 장기 보존이 필요하면 Render persistent disk 또는 외부 DB를 사용한다.

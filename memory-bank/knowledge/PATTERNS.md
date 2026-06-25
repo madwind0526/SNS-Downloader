@@ -188,3 +188,11 @@ fs.writeFileSync(userCookiePath(username), JSON.stringify(encrypted, null, 2), '
 ```
 
 For yt-dlp, decrypt only for the current request, write a temporary `cookies.txt`, pass `--cookies`, then delete the temporary file when the process exits.
+
+Cookie status APIs should report only safe metadata:
+
+```json
+{"exists":true,"size":612345,"decryptOk":true,"cookieCount":120}
+```
+
+Never return cookie values or full decrypted cookie text in logs or API responses.
