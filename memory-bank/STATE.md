@@ -2,14 +2,14 @@
 
 ## Current Wave
 
-- **Wave:** 10
+- **Wave:** 11
 - **Status:** Completed
 - **Cache Status:** CLEAN
-- **Last Checkpoint:** v1.16 Render cookie diagnostics completed (2026-06-25)
+- **Last Checkpoint:** v1.17 Tumblr 429 handling completed (2026-06-25)
 
 ## Version
 
-- Current app version: `1.16`
+- Current app version: `1.17`
 - Local server: `http://localhost:3001`
 - Render server: `https://sns-downloader.onrender.com`
 
@@ -27,6 +27,7 @@
 | 8 | Render username/password login, admin UI, encrypted per-user cookies | Completed | 2026-06-25 |
 | 9 | Retry yt-dlp with registered cookies on Tumblr no-video errors | Completed | 2026-06-25 |
 | 10 | Render cookie status diagnostics and reset documentation | Completed | 2026-06-25 |
+| 11 | Tumblr 429 user guidance and throttled yt-dlp requests | Completed | 2026-06-25 |
 
 ## Session Notes
 
@@ -45,3 +46,4 @@
 - 2026-06-25: Added Render user login. `ACCESS_TOKEN` is now an invite code, `admin` is the only admin username, and Render cookies are encrypted per user with a 1MB upload limit.
 - 2026-06-25: Fixed Tumblr cookie retry. Registered cookies are now retried for no-video yt-dlp errors, not only explicit login errors.
 - 2026-06-25: Confirmed Render `/api/users/bootstrap` can return `needsAdmin:true` after deploy because runtime `server/data/` is ephemeral. Added cookie decrypt/count diagnostics without exposing cookie values.
+- 2026-06-25: Added Tumblr-specific yt-dlp sleep options and Korean 429 guidance for Render IP rate limiting.

@@ -211,3 +211,24 @@ Render 기본 파일시스템은 ephemeral이다. `server/data/users.json`과 `s
 ### 해결
 
 Free 테스트에서는 deploy 후 admin 등록과 쿠키 업로드를 다시 진행한다. 장기 보존이 필요하면 Render persistent disk 또는 외부 DB를 사용한다.
+
+## Tumblr Render 요청이 HTTP 429로 제한됨
+
+### 증상
+
+- PC mode에서는 Tumblr 다운로드가 되지만 Render Server mode에서는 `HTTP Error 429: Too Many Requests`가 발생한다.
+
+### 원인
+
+Tumblr가 Render 서버 IP 또는 Render IP 대역을 rate limit으로 제한할 수 있다. 이 경우 쿠키 인증 문제가 아니라 서버 IP/요청 빈도 문제다.
+
+### 해결
+
+1. 429 에러는 한국어로 PC mode / Phone via PC 대안을 안내한다.
+2. Tumblr URL에만 yt-dlp 요청 지연 옵션을 적용한다.
+
+```text
+--sleep-requests 2 --sleep-interval 2 --max-sleep-interval 6
+```
+
+이미 Render IP가 강하게 제한된 경우에는 시간이 지나야 풀릴 수 있다.

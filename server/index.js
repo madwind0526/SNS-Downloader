@@ -110,6 +110,15 @@ const YT_DLP = process.platform === 'win32'
   ? path.join(__dirname, '..', 'bin', 'yt-dlp.exe')
   : 'yt-dlp';
 
+function isTumblrUrl(url) {
+  try { return /(^|\.)tumblr\.com$/i.test(new URL(url).hostname); } catch { return false; }
+}
+
+function throttledSiteArgs(url) {
+  if (!isTumblrUrl(url)) return [];
+  return ['--sleep-requests', '2', '--sleep-interval', '2', '--max-sleep-interval', '6'];
+}
+
 // Simple server-side config (cookies path, etc.)
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const DATA_DIR = path.join(__dirname, 'data');
@@ -805,6 +814,7 @@ app.post('/api/info', async (req, res) => {
     '--dump-json', '--no-warnings',
     '--retries', '3', '--fragment-retries', '3',
     '--socket-timeout', '30',
+    ...throttledSiteArgs(url),
     '--playlist-items', '1-10',
   ];
 
@@ -969,6 +979,7 @@ app.post('/api/download', (req, res) => {
     '--no-playlist', '--no-warnings',
     '--retries', '3', '--fragment-retries', '5',
     '--socket-timeout', '30',
+    ...throttledSiteArgs(downloadUrl),
     ...cookieBundle.args,
     '-f', format || 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
     '-o', outTemplate,
@@ -1554,6 +1565,9 @@ function safeFilePath(filename) {
 
 function parseYtDlpError(stderr) {
   if (!stderr) return '알 수 없는 오류';
+  if (stderr.includes('HTTP Error 429') || stderr.includes('Too Many Requests')) {
+    return 'Tumblr가 Render 서버 요청을 잠시 제한했습니다. 잠시 후 다시 시도하거나 PC mode / Phone via PC를 사용하세요.';
+  }
   if (stderr.includes('Private video'))                  return '비공개 영상입니다.';
   if (stderr.includes('This video is not available'))    return '이 지역에서 재생할 수 없는 영상입니다.';
   if (stderr.includes('Unsupported URL'))                return '지원하지 않는 URL입니다.';
