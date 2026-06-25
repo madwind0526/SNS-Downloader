@@ -12,6 +12,7 @@ const os       = require('os');
 const QRCode   = require('qrcode');
 const { rateLimit } = require('express-rate-limit');
 const { Pool } = require('pg');
+const { isThreadsUrl, fetchThreadsInfo } = require('./threads');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -169,6 +170,15 @@ function ensureDataDirs() {
 
 function loadConfig() {
   try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { return {}; }
+}
+
+// Returns the active cookies.txt file path, or null if none is configured.
+function getActiveCookiesFilePath() {
+  ensureEnvCookies();
+  if (envCookiesPath && fs.existsSync(envCookiesPath)) return envCookiesPath;
+  const cfg = loadConfig();
+  if (cfg.cookiesPath && fs.existsSync(cfg.cookiesPath)) return cfg.cookiesPath;
+  return null;
 }
 function saveConfig(data) {
   try { fs.writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2), 'utf8'); } catch {}
@@ -1125,6 +1135,17 @@ app.get('/api/qr', async (req, res) => {
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL이 필요합니다.' });
+
+  // ── Threads custom handler (yt-dlp has no extractor for threads.com) ──────
+  if (isThreadsUrl(url)) {
+    try {
+      const result = await fetchThreadsInfo(url, getActiveCookiesFilePath());
+      return res.json(result);
+    } catch (e) {
+      console.error('[threads] error:', e.message);
+      return res.status(400).json({ error: e.message || 'Threads 영상을 가져오지 못했습니다.' });
+    }
+  }
 
   const BASE_ARGS = [
     '--dump-json', '--no-warnings',
