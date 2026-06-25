@@ -1135,6 +1135,19 @@ app.post('/api/info', async (req, res) => {
       s.includes('no video formats found');
   };
 
+  const isRateLimitedError = t => {
+    const s = String(t || '').toLowerCase();
+    return s.includes('http error 429') ||
+      s.includes('too many requests');
+  };
+
+  const errorKind = t => {
+    if (isRateLimitedError(t)) return 'rate_limited';
+    if (isLoginError(t)) return 'login_required';
+    if (isNoVideoError(t)) return 'no_video';
+    return 'unknown';
+  };
+
   try {
     // First attempt — no cookies (avoids format conflicts for public content)
     let stdout;
@@ -1142,7 +1155,9 @@ app.post('/api/info', async (req, res) => {
       stdout = await runYtDlp(false);
     } catch (errText) {
       const hasCookies = await requestHasCookies(req);
-      const shouldRetryWithCookies = isLoginError(errText) || (isNoVideoError(errText) && hasCookies);
+      const firstErrorKind = errorKind(errText);
+      const shouldRetryWithCookies = isLoginError(errText) ||
+        ((isNoVideoError(errText) || isRateLimitedError(errText)) && hasCookies);
       if (shouldRetryWithCookies) {
         console.log('[info] retrying with cookies...');
         try {
@@ -1162,8 +1177,31 @@ app.post('/api/info', async (req, res) => {
           stdout = await runYtDlp(true); // second attempt with cookies
         } catch (retryErr) {
           const msg = typeof retryErr === 'string' ? retryErr : retryErr.message;
+          const retryErrorKind = errorKind(msg);
+          const userCookie = requiresUserAuth(req) ? await userCookieStatus(req) : null;
+          if (retryErrorKind === 'no_video' && isTumblrUrl(url)) {
+            return res.status(400).json({
+              error: '쿠키로 재시도했지만 Tumblr가 이 포스트의 동영상을 반환하지 않았습니다. Tumblr에 로그인된 cookies.txt인지 확인하거나 PC mode / Phone via PC로 시도하세요.',
+              diagnostics: {
+                firstErrorKind,
+                retryErrorKind,
+                retriedWithCookies: true,
+                cookieExists: !!userCookie?.exists,
+                cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
+                cookieCount: userCookie?.cookieCount || 0,
+              },
+            });
+          }
           return res.status(400).json({
-            error: msg,
+            error: parseYtDlpError(msg),
+            diagnostics: {
+              firstErrorKind,
+              retryErrorKind,
+              retriedWithCookies: true,
+              cookieExists: !!userCookie?.exists,
+              cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
+              cookieCount: userCookie?.cookieCount || 0,
+            },
             needClose: retryErr.needClose || false,
             needSetup: retryErr.needSetup || false,
             browser: retryErr.browser || null,

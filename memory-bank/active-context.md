@@ -2,7 +2,8 @@
 
 ## Current Focus
 
-- SNS Downloader v1.19 Render storage diagnostics added.
+- SNS Downloader v1.20 Render Tumblr info retry improved.
+- `/api/info` now retries with registered cookies when the first Tumblr/yt-dlp attempt returns `429 Too Many Requests`.
 - `/api/storage/status` reports whether Render is using file fallback or Postgres without exposing secrets.
 - `DATABASE_URL` enables Postgres storage for Render users and encrypted per-user cookies.
 - Supabase/Neon Postgres should work with default SSL; local non-SSL Postgres can set `DATABASE_SSL=0`.
@@ -10,7 +11,7 @@
 - Existing file-backed users/cookies are migrated once if DB is empty on first initialization.
 - Render still needs `ACCESS_TOKEN` as the invite code for user registration.
 - First user must be exact username `admin`; other usernames cannot include `admin`.
-- Next deploy should verify `https://sns-downloader.onrender.com/api/version` returns `1.19`.
+- Next deploy should verify `https://sns-downloader.onrender.com/api/version` returns `1.20`.
 
 ## Current Behavior
 
