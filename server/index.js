@@ -24,6 +24,7 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const COOKIE_UPLOAD_LIMIT_BYTES = 1024 * 1024;
 const sessions = new Map();
 const lastCookieUseByUser = new Map();
+const recentYtDlpDiagnostics = [];
 
 function isLocalhostRequest(req) {
   const ip = req.ip || req.socket?.remoteAddress || '';
@@ -33,6 +34,30 @@ function isLocalhostRequest(req) {
 
 function requiresUserAuth(req) {
   return process.platform !== 'win32' && !isLocalhostRequest(req);
+}
+
+function safeUrlSummary(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    return {
+      host: u.hostname,
+      pathname: u.pathname.slice(0, 120),
+    };
+  } catch {
+    return { host: null, pathname: null };
+  }
+}
+
+function rememberYtDlpDiagnostic(entry) {
+  recentYtDlpDiagnostics.unshift({
+    at: new Date().toISOString(),
+    ...entry,
+  });
+  recentYtDlpDiagnostics.splice(20);
+}
+
+function tailText(text, limit = 1500) {
+  return String(text || '').slice(-limit);
 }
 
 function parseCookies(req) {
@@ -1033,6 +1058,10 @@ app.delete('/api/admin/users/:username/cookies', userAuthMiddleware, requireAdmi
   res.json({ ok: true });
 });
 
+app.get('/api/admin/diagnostics/yt-dlp', userAuthMiddleware, requireAdmin, (req, res) => {
+  res.json({ items: recentYtDlpDiagnostics });
+});
+
 // ── POST /api/auth ───────────────────────────
 // Legacy endpoint retained so old clients receive a clear migration signal.
 app.post('/api/auth', (req, res) => {
@@ -1202,6 +1231,23 @@ app.post('/api/info', async (req, res) => {
     } catch (errText) {
       const hasCookies = initialHasCookies || await requestHasCookies(req);
       const firstErrorKind = errorKind(errText);
+      const firstCookieStatus = requiresUserAuth(req) ? await userCookieStatus(req) : null;
+      rememberYtDlpDiagnostic({
+        endpoint: 'info',
+        stage: 'initial',
+        url: safeUrlSummary(url),
+        withCookies: initialHasCookies,
+        errorKind: firstErrorKind,
+        stderrTail: tailText(errText),
+        cookie: firstCookieStatus ? {
+          exists: firstCookieStatus.exists,
+          decryptOk: firstCookieStatus.decryptOk,
+          cookieCount: firstCookieStatus.cookieCount,
+          hashMatch: firstCookieStatus.hashMatch,
+          decryptedSha256: firstCookieStatus.decryptedSha256,
+          lastUse: firstCookieStatus.lastUse,
+        } : null,
+      });
       const shouldRetryWithCookies = !initialHasCookies && (
         isLoginError(errText) ||
         ((isNoVideoError(errText) || isRateLimitedError(errText)) && hasCookies)
@@ -1227,6 +1273,22 @@ app.post('/api/info', async (req, res) => {
           const msg = typeof retryErr === 'string' ? retryErr : retryErr.message;
           const retryErrorKind = errorKind(msg);
           const userCookie = requiresUserAuth(req) ? await userCookieStatus(req) : null;
+          rememberYtDlpDiagnostic({
+            endpoint: 'info',
+            stage: 'retry',
+            url: safeUrlSummary(url),
+            withCookies: true,
+            errorKind: retryErrorKind,
+            stderrTail: tailText(msg),
+            cookie: userCookie ? {
+              exists: userCookie.exists,
+              decryptOk: userCookie.decryptOk,
+              cookieCount: userCookie.cookieCount,
+              hashMatch: userCookie.hashMatch,
+              decryptedSha256: userCookie.decryptedSha256,
+              lastUse: userCookie.lastUse,
+            } : null,
+          });
           if (retryErrorKind === 'no_video' && isTumblrUrl(url)) {
             return res.status(400).json({
               error: '쿠키로 재시도했지만 Tumblr가 이 포스트의 동영상을 반환하지 않았습니다. Tumblr에 로그인된 cookies.txt인지 확인하거나 PC mode / Phone via PC로 시도하세요.',
@@ -1376,6 +1438,19 @@ app.post('/api/download', async (req, res) => {
 
     if (code !== 0) {
       console.error('[download] failed:\n', stderr.slice(-500));
+      rememberYtDlpDiagnostic({
+        endpoint: 'download',
+        stage: 'download',
+        url: safeUrlSummary(downloadUrl),
+        withCookies: cookieBundle.args.length > 0,
+        errorKind: stderr.includes('HTTP Error 429') || stderr.includes('Too Many Requests') ? 'rate_limited' :
+          stderr.toLowerCase().includes('no video') ? 'no_video' : 'unknown',
+        stderrTail: tailText(stderr),
+        cookie: req.user?.username ? {
+          username: req.user.username,
+          lastUse: lastCookieUseByUser.get(req.user.username) || null,
+        } : null,
+      });
       cleanup(sessionId);
       return res.status(400).json({ error: parseYtDlpError(stderr) });
     }

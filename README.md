@@ -1,4 +1,4 @@
-# SNS Downloader v1.22
+# SNS Downloader v1.23
 
 SNS 영상/이미지를 다운로드하는 Node.js + yt-dlp 기반 웹앱입니다.
 
@@ -152,6 +152,7 @@ https://sns-downloader.onrender.com/api/version
 | `GET` | `/api/version` | 앱 버전/플랫폼 확인 |
 | `GET` | `/api/storage/status` | 저장소 상태 확인 |
 | `GET` | `/api/settings/cookies/diagnostics` | 쿠키 저장/복호화/사용 해시 진단 |
+| `GET` | `/api/admin/diagnostics/yt-dlp` | 관리자용 yt-dlp 최근 실패 진단 |
 | `POST` | `/api/info` | URL 분석 |
 | `POST` | `/api/download` | 서버 다운로드 실행 |
 | `GET` | `/api/files` | 서버 준비 파일 목록 |
