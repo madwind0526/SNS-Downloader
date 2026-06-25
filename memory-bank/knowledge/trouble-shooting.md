@@ -212,6 +212,12 @@ Render 기본 파일시스템은 ephemeral이다. `server/data/users.json`과 `s
 
 Free 테스트에서는 deploy 후 admin 등록과 쿠키 업로드를 다시 진행한다. 장기 보존이 필요하면 Render persistent disk 또는 외부 DB를 사용한다.
 
+### 개선
+
+`DATABASE_URL`을 설정하면 사용자와 암호화 쿠키를 Postgres에 저장한다. Supabase/Neon 같은 무료 Postgres를 붙이면 Render Free의 ephemeral filesystem과 무관하게 deploy/restart 후에도 admin/user와 쿠키 상태가 유지된다.
+
+DB가 비어 있고 기존 `server/data/users.json`이 있으면 첫 DB 초기화 때 파일 저장 데이터를 한 번 가져온다.
+
 ## Tumblr Render 요청이 HTTP 429로 제한됨
 
 ### 증상

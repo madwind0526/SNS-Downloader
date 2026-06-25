@@ -11,6 +11,7 @@ const http     = require('http');
 const os       = require('os');
 const QRCode   = require('qrcode');
 const { rateLimit } = require('express-rate-limit');
+const { Pool } = require('pg');
 
 const app  = express();
 const PORT = process.env.PORT || 3001;
@@ -125,6 +126,14 @@ const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const USER_COOKIES_DIR = path.join(DATA_DIR, 'cookies');
 const RUNTIME_COOKIES_FILE = path.join(os.tmpdir(), 'sns-downloader-cookies.txt');
+const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
+const dbPool = DATABASE_URL
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === '0' ? false : { rejectUnauthorized: false },
+    })
+  : null;
+let dbReady = false;
 let envCookiesChecked = false;
 let envCookiesPath = null;
 
@@ -152,6 +161,205 @@ function loadUsers() {
 function saveUsers(data) {
   ensureDataDirs();
   fs.writeFileSync(USERS_FILE, JSON.stringify({ users: data.users || [] }, null, 2), 'utf8');
+}
+
+async function ensureDb() {
+  if (!dbPool || dbReady) return;
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS sns_users (
+      username TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      password_salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      cookie_key_salt TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_login_at TEXT,
+      cookie_size INTEGER NOT NULL DEFAULT 0,
+      cookie_updated_at TEXT
+    )
+  `);
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS sns_user_cookies (
+      username TEXT PRIMARY KEY REFERENCES sns_users(username) ON DELETE CASCADE,
+      encrypted_json TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  const countResult = await dbPool.query('SELECT COUNT(*)::int AS count FROM sns_users');
+  if (Number(countResult.rows[0]?.count || 0) === 0 && fs.existsSync(USERS_FILE)) {
+    const local = loadUsers();
+    for (const user of local.users) {
+      await dbPool.query(`
+        INSERT INTO sns_users (
+          username, role, password_salt, password_hash, cookie_key_salt,
+          created_at, last_login_at, cookie_size, cookie_updated_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT (username) DO NOTHING
+      `, [
+        user.username, user.role, user.passwordSalt, user.passwordHash, user.cookieKeySalt,
+        user.createdAt, user.lastLoginAt || null, user.cookieSize || 0, user.cookieUpdatedAt || null,
+      ]);
+      const cookiePath = userCookiePath(user.username);
+      if (fs.existsSync(cookiePath)) {
+        await dbPool.query(`
+          INSERT INTO sns_user_cookies (username, encrypted_json, size, updated_at)
+          VALUES ($1,$2,$3,$4)
+          ON CONFLICT (username) DO NOTHING
+        `, [
+          user.username,
+          fs.readFileSync(cookiePath, 'utf8'),
+          user.cookieSize || 0,
+          user.cookieUpdatedAt || new Date().toISOString(),
+        ]);
+      }
+    }
+  }
+  dbReady = true;
+}
+
+function rowToUser(row) {
+  if (!row) return null;
+  return {
+    username: row.username,
+    role: row.role,
+    passwordSalt: row.password_salt,
+    passwordHash: row.password_hash,
+    cookieKeySalt: row.cookie_key_salt,
+    createdAt: row.created_at,
+    lastLoginAt: row.last_login_at,
+    cookieSize: Number(row.cookie_size || 0),
+    cookieUpdatedAt: row.cookie_updated_at,
+  };
+}
+
+async function loadUsersStore() {
+  if (!dbPool) return loadUsers();
+  await ensureDb();
+  const result = await dbPool.query('SELECT * FROM sns_users ORDER BY created_at ASC');
+  return { users: result.rows.map(rowToUser) };
+}
+
+async function findUser(username) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) return loadUsers().users.find(u => u.username === normalized) || null;
+  await ensureDb();
+  const result = await dbPool.query('SELECT * FROM sns_users WHERE username = $1', [normalized]);
+  return rowToUser(result.rows[0]);
+}
+
+async function insertUser(user) {
+  if (!dbPool) {
+    const data = loadUsers();
+    data.users.push(user);
+    saveUsers(data);
+    return;
+  }
+  await ensureDb();
+  await dbPool.query(`
+    INSERT INTO sns_users (
+      username, role, password_salt, password_hash, cookie_key_salt,
+      created_at, last_login_at, cookie_size, cookie_updated_at
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+  `, [
+    user.username, user.role, user.passwordSalt, user.passwordHash, user.cookieKeySalt,
+    user.createdAt, user.lastLoginAt || null, user.cookieSize || 0, user.cookieUpdatedAt || null,
+  ]);
+}
+
+async function updateUser(username, patch) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) {
+    const data = loadUsers();
+    const user = data.users.find(u => u.username === normalized);
+    if (!user) return null;
+    Object.assign(user, patch);
+    saveUsers(data);
+    return user;
+  }
+  await ensureDb();
+  const current = await findUser(normalized);
+  if (!current) return null;
+  const next = { ...current, ...patch };
+  await dbPool.query(`
+    UPDATE sns_users
+    SET role=$2, password_salt=$3, password_hash=$4, cookie_key_salt=$5,
+        created_at=$6, last_login_at=$7, cookie_size=$8, cookie_updated_at=$9
+    WHERE username=$1
+  `, [
+    next.username, next.role, next.passwordSalt, next.passwordHash, next.cookieKeySalt,
+    next.createdAt, next.lastLoginAt || null, next.cookieSize || 0, next.cookieUpdatedAt || null,
+  ]);
+  return next;
+}
+
+async function deleteUserStore(username) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) {
+    const data = loadUsers();
+    const before = data.users.length;
+    data.users = data.users.filter(u => u.username !== normalized);
+    saveUsers(data);
+    return data.users.length !== before;
+  }
+  await ensureDb();
+  const result = await dbPool.query('DELETE FROM sns_users WHERE username = $1', [normalized]);
+  return result.rowCount > 0;
+}
+
+async function getEncryptedCookieRecord(username) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) {
+    const filePath = userCookiePath(normalized);
+    if (!fs.existsSync(filePath)) return null;
+    const user = loadUsers().users.find(u => u.username === normalized);
+    return {
+      encryptedJson: fs.readFileSync(filePath, 'utf8'),
+      size: user?.cookieSize || 0,
+      updatedAt: user?.cookieUpdatedAt || null,
+    };
+  }
+  await ensureDb();
+  const result = await dbPool.query('SELECT * FROM sns_user_cookies WHERE username = $1', [normalized]);
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    encryptedJson: row.encrypted_json,
+    size: Number(row.size || 0),
+    updatedAt: row.updated_at,
+  };
+}
+
+async function saveEncryptedCookieRecord(username, encryptedJson, size, updatedAt) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) {
+    ensureDataDirs();
+    fs.writeFileSync(userCookiePath(normalized), encryptedJson, 'utf8');
+    await updateUser(normalized, { cookieSize: size, cookieUpdatedAt: updatedAt });
+    return;
+  }
+  await ensureDb();
+  await dbPool.query(`
+    INSERT INTO sns_user_cookies (username, encrypted_json, size, updated_at)
+    VALUES ($1,$2,$3,$4)
+    ON CONFLICT (username)
+    DO UPDATE SET encrypted_json = EXCLUDED.encrypted_json,
+                  size = EXCLUDED.size,
+                  updated_at = EXCLUDED.updated_at
+  `, [normalized, encryptedJson, size, updatedAt]);
+  await updateUser(normalized, { cookieSize: size, cookieUpdatedAt: updatedAt });
+}
+
+async function deleteEncryptedCookieRecord(username) {
+  const normalized = normalizeUsername(username);
+  if (!dbPool) {
+    try { fs.unlinkSync(userCookiePath(normalized)); } catch {}
+    await updateUser(normalized, { cookieSize: 0, cookieUpdatedAt: null });
+    return;
+  }
+  await ensureDb();
+  await dbPool.query('DELETE FROM sns_user_cookies WHERE username = $1', [normalized]);
+  await updateUser(normalized, { cookieSize: 0, cookieUpdatedAt: null });
 }
 
 function normalizeUsername(username) {
@@ -214,8 +422,8 @@ function userCookiePath(username) {
   return path.join(USER_COOKIES_DIR, `${normalizeUsername(username)}.enc`);
 }
 
-function hasUserCookie(username) {
-  return fs.existsSync(userCookiePath(username));
+async function hasUserCookie(username) {
+  return !!(username && await getEncryptedCookieRecord(username));
 }
 
 function removeUserSessions(username) {
@@ -295,8 +503,10 @@ function encryptUserCookies(content, key) {
   };
 }
 
-function decryptUserCookiesFile(username, key) {
-  const raw = JSON.parse(fs.readFileSync(userCookiePath(username), 'utf8'));
+async function decryptUserCookiesFile(username, key) {
+  const record = await getEncryptedCookieRecord(username);
+  if (!record) throw new Error('Cookie record not found');
+  const raw = JSON.parse(record.encryptedJson);
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(raw.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(raw.tag, 'base64'));
   return Buffer.concat([
@@ -309,20 +519,21 @@ function countCookieLines(content) {
   return String(content || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
 }
 
-function userCookieStatus(req) {
+async function userCookieStatus(req) {
   const username = req.user?.username;
-  const user = loadUsers().users.find(u => u.username === username);
-  const exists = !!(username && hasUserCookie(username));
+  const user = await findUser(username);
+  const record = username ? await getEncryptedCookieRecord(username) : null;
+  const exists = !!record;
   const status = {
     exists,
-    size: user?.cookieSize || 0,
-    updatedAt: user?.cookieUpdatedAt || null,
+    size: record?.size || user?.cookieSize || 0,
+    updatedAt: record?.updatedAt || user?.cookieUpdatedAt || null,
     decryptOk: false,
     cookieCount: 0,
   };
   if (!exists || !req.session?.cookieKey) return status;
   try {
-    const content = decryptUserCookiesFile(username, req.session.cookieKey);
+    const content = await decryptUserCookiesFile(username, req.session.cookieKey);
     status.decryptOk = true;
     status.cookieCount = countCookieLines(content);
   } catch (e) {
@@ -331,7 +542,7 @@ function userCookieStatus(req) {
   return status;
 }
 
-function saveEncryptedUserCookies(req, content) {
+async function saveEncryptedUserCookies(req, content) {
   if (!req.session?.cookieKey || !req.user?.username) {
     const err = new Error('로그인이 필요합니다.');
     err.statusCode = 401;
@@ -339,16 +550,8 @@ function saveEncryptedUserCookies(req, content) {
   }
   const { normalized, size } = validateCookieContent(content);
   const encrypted = encryptUserCookies(normalized, req.session.cookieKey);
-  ensureDataDirs();
-  fs.writeFileSync(userCookiePath(req.user.username), JSON.stringify(encrypted, null, 2), 'utf8');
-
-  const data = loadUsers();
-  const user = data.users.find(u => u.username === req.user.username);
-  if (user) {
-    user.cookieSize = size;
-    user.cookieUpdatedAt = new Date().toISOString();
-    saveUsers(data);
-  }
+  const updatedAt = new Date().toISOString();
+  await saveEncryptedCookieRecord(req.user.username, JSON.stringify(encrypted, null, 2), size, updatedAt);
   return {
     path: userCookiePath(req.user.username),
     cookieCount: countCookieLines(normalized),
@@ -356,25 +559,18 @@ function saveEncryptedUserCookies(req, content) {
   };
 }
 
-function removeEncryptedUserCookies(username) {
-  try { fs.unlinkSync(userCookiePath(username)); } catch {}
-  const data = loadUsers();
-  const user = data.users.find(u => u.username === normalizeUsername(username));
-  if (user) {
-    user.cookieSize = 0;
-    user.cookieUpdatedAt = null;
-    saveUsers(data);
-  }
+async function removeEncryptedUserCookies(username) {
+  await deleteEncryptedCookieRecord(username);
 }
 
-function requestCookiesArgs(req) {
+async function requestCookiesArgs(req) {
   if (!requiresUserAuth(req)) return { args: cookiesArgs(), cleanup: () => {} };
-  if (!req.session?.cookieKey || !req.user?.username || !hasUserCookie(req.user.username)) {
+  if (!req.session?.cookieKey || !req.user?.username || !(await hasUserCookie(req.user.username))) {
     return { args: [], cleanup: () => {} };
   }
 
   const tempPath = path.join(os.tmpdir(), `sns-dl-cookies-${req.user.username}-${crypto.randomBytes(8).toString('hex')}.txt`);
-  const content = decryptUserCookiesFile(req.user.username, req.session.cookieKey);
+  const content = await decryptUserCookiesFile(req.user.username, req.session.cookieKey);
   fs.writeFileSync(tempPath, content, 'utf8');
   console.log(`[cookies] using user cookies username=${req.user.username} count=${countCookieLines(content)}`);
   return {
@@ -383,9 +579,9 @@ function requestCookiesArgs(req) {
   };
 }
 
-function requestHasCookies(req) {
+async function requestHasCookies(req) {
   if (!requiresUserAuth(req)) return cookiesArgs().length > 0;
-  return !!(req.user?.username && hasUserCookie(req.user.username));
+  return !!(req.user?.username && await hasUserCookie(req.user.username));
 }
 
 function ensureEnvCookies() {
@@ -617,8 +813,8 @@ const { version } = require('../package.json');
 app.get('/api/version', (req, res) => res.json({ version, platform: process.platform }));
 
 // ── User auth APIs ───────────────────────────
-app.get('/api/users/bootstrap', (req, res) => {
-  const users = loadUsers().users;
+app.get('/api/users/bootstrap', async (req, res) => {
+  const users = (await loadUsersStore()).users;
   res.json({
     needsAdmin: !users.some(u => u.username === 'admin'),
     inviteRequired: true,
@@ -626,17 +822,22 @@ app.get('/api/users/bootstrap', (req, res) => {
   });
 });
 
-app.get('/api/users/me', (req, res) => {
+app.get('/api/users/me', async (req, res) => {
   const session = getSession(req);
   if (!requiresUserAuth(req)) {
     return res.json({ ok: true, authRequired: false, user: null });
   }
   if (!session) return res.json({ ok: false, authRequired: true, user: null });
-  const user = loadUsers().users.find(u => u.username === session.username);
-  res.json({ ok: !!user, authRequired: true, user: publicUser(user) });
+  try {
+    const user = await findUser(session.username);
+    res.json({ ok: !!user, authRequired: true, user: publicUser(user) });
+  } catch (err) {
+    console.error('[users/me]', err);
+    res.status(500).json({ error: '사용자 정보를 불러올 수 없습니다.' });
+  }
 });
 
-app.post('/api/users/register', (req, res) => {
+app.post('/api/users/register', async (req, res) => {
   const username = normalizeUsername(req.body.username);
   const password = String(req.body.password || '');
   const inviteCode = String(req.body.inviteCode || '').trim();
@@ -648,7 +849,7 @@ app.post('/api/users/register', (req, res) => {
     return res.status(403).json({ error: '초대 코드가 올바르지 않습니다.' });
   }
 
-  const data = loadUsers();
+  const data = await loadUsersStore();
   const hasAdmin = data.users.some(u => u.username === 'admin');
   if (!hasAdmin && username !== 'admin') {
     return res.status(400).json({ error: '첫 번째 사용자는 admin으로 등록해야 합니다.' });
@@ -669,22 +870,20 @@ app.post('/api/users/register', (req, res) => {
     cookieSize: 0,
     cookieUpdatedAt: null,
   };
-  data.users.push(user);
-  saveUsers(data);
+  await insertUser(user);
   createUserSession(res, user, password);
   res.json({ ok: true, user: publicUser(user) });
 });
 
-app.post('/api/users/login', (req, res) => {
+app.post('/api/users/login', async (req, res) => {
   const username = normalizeUsername(req.body.username);
   const password = String(req.body.password || '');
-  const data = loadUsers();
-  const user = data.users.find(u => u.username === username);
+  const user = await findUser(username);
   if (!user || !verifyPassword(password, user)) {
     return res.status(401).json({ error: '사용자 이름 또는 비밀번호가 올바르지 않습니다.' });
   }
   user.lastLoginAt = new Date().toISOString();
-  saveUsers(data);
+  await updateUser(username, { lastLoginAt: user.lastLoginAt });
   createUserSession(res, user, password);
   res.json({ ok: true, user: publicUser(user) });
 });
@@ -701,48 +900,45 @@ function requireAdmin(req, res, next) {
   res.status(403).json({ error: '관리자 권한이 필요합니다.' });
 }
 
-app.get('/api/admin/users', userAuthMiddleware, requireAdmin, (req, res) => {
-  const users = loadUsers().users.map(user => ({
+app.get('/api/admin/users', userAuthMiddleware, requireAdmin, async (req, res) => {
+  const users = (await loadUsersStore()).users.map(user => ({
     ...publicUser(user),
-    cookieExists: hasUserCookie(user.username),
   }));
+  for (const user of users) user.cookieExists = await hasUserCookie(user.username);
   res.json({ users });
 });
 
-app.delete('/api/admin/users/:username', userAuthMiddleware, requireAdmin, (req, res) => {
+app.delete('/api/admin/users/:username', userAuthMiddleware, requireAdmin, async (req, res) => {
   const username = normalizeUsername(req.params.username);
   if (username === 'admin') return res.status(400).json({ error: 'admin 사용자는 삭제할 수 없습니다.' });
-  const data = loadUsers();
-  const before = data.users.length;
-  data.users = data.users.filter(u => u.username !== username);
-  if (data.users.length === before) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
-  saveUsers(data);
-  removeEncryptedUserCookies(username);
+  const deleted = await deleteUserStore(username);
+  if (!deleted) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
+  await removeEncryptedUserCookies(username);
   removeUserSessions(username);
   res.json({ ok: true });
 });
 
-app.post('/api/admin/users/:username/reset-password', userAuthMiddleware, requireAdmin, (req, res) => {
+app.post('/api/admin/users/:username/reset-password', userAuthMiddleware, requireAdmin, async (req, res) => {
   const username = normalizeUsername(req.params.username);
   const password = String(req.body.password || '');
   const passwordError = validatePassword(password);
   if (passwordError) return res.status(400).json({ error: passwordError });
-  const data = loadUsers();
-  const user = data.users.find(u => u.username === username);
+  const user = await findUser(username);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
-  Object.assign(user, createPasswordRecord(password));
-  user.cookieKeySalt = crypto.randomBytes(16).toString('base64');
-  user.cookieSize = 0;
-  user.cookieUpdatedAt = null;
-  saveUsers(data);
-  removeEncryptedUserCookies(username);
+  await updateUser(username, {
+    ...createPasswordRecord(password),
+    cookieKeySalt: crypto.randomBytes(16).toString('base64'),
+    cookieSize: 0,
+    cookieUpdatedAt: null,
+  });
+  await removeEncryptedUserCookies(username);
   removeUserSessions(username);
   res.json({ ok: true });
 });
 
-app.delete('/api/admin/users/:username/cookies', userAuthMiddleware, requireAdmin, (req, res) => {
+app.delete('/api/admin/users/:username/cookies', userAuthMiddleware, requireAdmin, async (req, res) => {
   const username = normalizeUsername(req.params.username);
-  removeEncryptedUserCookies(username);
+  await removeEncryptedUserCookies(username);
   res.json({ ok: true });
 });
 
@@ -818,21 +1014,23 @@ app.post('/api/info', async (req, res) => {
     '--playlist-items', '1-10',
   ];
 
-  const runYtDlp = (withCookies = false) => new Promise((resolve, reject) => {
-    const cookieBundle = withCookies ? requestCookiesArgs(req) : { args: [], cleanup: () => {} };
-    const args = [...BASE_ARGS, ...cookieBundle.args, url];
-    execFile(YT_DLP, args,
-      { timeout: 90000, maxBuffer: 50 * 1024 * 1024 }, // 50MB — YouTube has many formats
-      (err, stdout, stderr) => {
-        cookieBundle.cleanup();
-        if (err) {
-          console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
-          return reject(stderr || err.message);
+  const runYtDlp = async (withCookies = false) => {
+    const cookieBundle = withCookies ? await requestCookiesArgs(req) : { args: [], cleanup: () => {} };
+    return new Promise((resolve, reject) => {
+      const args = [...BASE_ARGS, ...cookieBundle.args, url];
+      execFile(YT_DLP, args,
+        { timeout: 90000, maxBuffer: 50 * 1024 * 1024 }, // 50MB — YouTube has many formats
+        (err, stdout, stderr) => {
+          cookieBundle.cleanup();
+          if (err) {
+            console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
+            return reject(stderr || err.message);
+          }
+          resolve(stdout);
         }
-        resolve(stdout);
-      }
-    );
-  });
+      );
+    });
+  };
 
   const parseStdout = (stdout) => {
     const hasVideo = f =>
@@ -898,13 +1096,14 @@ app.post('/api/info', async (req, res) => {
     try {
       stdout = await runYtDlp(false);
     } catch (errText) {
-      const shouldRetryWithCookies = isLoginError(errText) || (isNoVideoError(errText) && requestHasCookies(req));
+      const hasCookies = await requestHasCookies(req);
+      const shouldRetryWithCookies = isLoginError(errText) || (isNoVideoError(errText) && hasCookies);
       if (shouldRetryWithCookies) {
         console.log('[info] retrying with cookies...');
         try {
           // If cookies.txt or browser cookies already configured, use them directly
           // without trying to extract from browser (extraction only needed for first-time setup)
-          if (!requestHasCookies(req)) {
+          if (!hasCookies) {
             if (requiresUserAuth(req)) {
               return res.status(400).json({
                 error: '이 계정에 쿠키가 등록되어 있지 않습니다.',
@@ -949,7 +1148,7 @@ app.post('/api/info', async (req, res) => {
 // localhost:  saves permanently to downloads folder, returns JSON (no browser download)
 // WiFi phone: saves permanently to downloads folder, streams to phone browser (keep file)
 // Render:     saves temp, streams to browser, deletes after
-app.post('/api/download', (req, res) => {
+app.post('/api/download', async (req, res) => {
   const { url, format, title, itemUrl } = req.body;
   const prepareOnly = req.body.prepareOnly === true || req.body.prepareOnly === 'true';
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
@@ -974,7 +1173,7 @@ app.post('/api/download', (req, res) => {
 
   const isAudioOnly = (format || '').startsWith('bestaudio');
   const isImage     = req.body.mediaType === 'image';
-  const cookieBundle = requestCookiesArgs(req);
+  const cookieBundle = await requestCookiesArgs(req);
   const args = [
     '--no-playlist', '--no-warnings',
     '--retries', '3', '--fragment-retries', '5',
@@ -1180,11 +1379,12 @@ app.get('/api/settings/pick-app', (req, res) => {
 });
 
 // ── GET /api/settings/cookies ────────────────
-app.get('/api/settings/cookies', (req, res) => {
+app.get('/api/settings/cookies', async (req, res) => {
   if (requiresUserAuth(req)) {
+    const cookieExists = req.user?.username ? await hasUserCookie(req.user.username) : false;
     return res.json({
-      path: hasUserCookie(req.user?.username) ? userCookiePath(req.user.username) : null,
-      ...userCookieStatus(req),
+      path: cookieExists ? userCookiePath(req.user.username) : null,
+      ...(await userCookieStatus(req)),
     });
   }
   ensureEnvCookies();
@@ -1218,11 +1418,11 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
 
 // ── POST /api/settings/upload-cookies ────────
 // Receive cookies.txt content (text/plain or JSON {content}) and save to disk
-app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb' }), (req, res) => {
+app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
   let content = typeof req.body === 'string' ? req.body : (req.body?.content || '');
   try {
     if (requiresUserAuth(req)) {
-      const saved = saveEncryptedUserCookies(req, content);
+      const saved = await saveEncryptedUserCookies(req, content);
       console.log(`[cookies] uploaded username=${req.user.username} size=${saved.size} count=${saved.cookieCount}`);
       return res.json({ ok: true, path: saved.path, cookieCount: saved.cookieCount, size: saved.size });
     }
@@ -1246,9 +1446,9 @@ app.post('/api/settings/auto-cookies', async (req, res) => {
 });
 
 // ── DELETE /api/settings/cookies ─────────────
-app.delete('/api/settings/cookies', (req, res) => {
+app.delete('/api/settings/cookies', async (req, res) => {
   if (requiresUserAuth(req)) {
-    removeEncryptedUserCookies(req.user.username);
+    await removeEncryptedUserCookies(req.user.username);
     return res.json({ ok: true });
   }
   const c = loadConfig();

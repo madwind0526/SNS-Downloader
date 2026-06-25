@@ -196,3 +196,29 @@ Cookie status APIs should report only safe metadata:
 ```
 
 Never return cookie values or full decrypted cookie text in logs or API responses.
+
+## Postgres-Backed Render User Storage
+
+Use `DATABASE_URL` as an optional storage switch. When it is set, store Render users and encrypted cookie blobs in Postgres; when it is missing, keep the local file fallback.
+
+Tables:
+
+```text
+sns_users
+sns_user_cookies
+```
+
+This works with Supabase and Neon Postgres connection strings. Default to SSL for hosted Postgres, and allow `DATABASE_SSL=0` only for local Postgres.
+
+Pattern:
+
+```js
+const dbPool = DATABASE_URL
+  ? new Pool({
+      connectionString: DATABASE_URL,
+      ssl: process.env.DATABASE_SSL === '0' ? false : { rejectUnauthorized: false },
+    })
+  : null;
+```
+
+Keep the storage API async even for file fallback so routes do not care which backend is active.
