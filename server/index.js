@@ -23,6 +23,7 @@ const SESSION_COOKIE = 'snsdl_sid';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const COOKIE_UPLOAD_LIMIT_BYTES = 1024 * 1024;
 const sessions = new Map();
+const lastCookieUseByUser = new Map();
 
 function isLocalhostRequest(req) {
   const ip = req.ip || req.socket?.remoteAddress || '';
@@ -532,9 +533,13 @@ function encryptUserCookies(content, key) {
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(content, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
+  const diagnostics = cookieTextDiagnostics(content);
   return {
     version: 1,
     algorithm: 'aes-256-gcm',
+    plaintextSha256: diagnostics.sha256,
+    plaintextSize: diagnostics.size,
+    cookieCount: diagnostics.cookieCount,
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
     ciphertext: ciphertext.toString('base64'),
@@ -557,6 +562,15 @@ function countCookieLines(content) {
   return String(content || '').split('\n').filter(l => l.trim() && !l.startsWith('#')).length;
 }
 
+function cookieTextDiagnostics(content) {
+  const text = String(content || '');
+  return {
+    sha256: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
+    size: Buffer.byteLength(text, 'utf8'),
+    cookieCount: countCookieLines(text),
+  };
+}
+
 async function userCookieStatus(req) {
   const username = req.user?.username;
   const user = await findUser(username);
@@ -571,12 +585,18 @@ async function userCookieStatus(req) {
   };
   if (!exists || !req.session?.cookieKey) return status;
   try {
+    const raw = JSON.parse(record.encryptedJson);
     const content = await decryptUserCookiesFile(username, req.session.cookieKey);
+    const decrypted = cookieTextDiagnostics(content);
     status.decryptOk = true;
-    status.cookieCount = countCookieLines(content);
+    status.cookieCount = decrypted.cookieCount;
+    status.savedSha256 = raw.plaintextSha256 || null;
+    status.decryptedSha256 = decrypted.sha256;
+    status.hashMatch = raw.plaintextSha256 ? raw.plaintextSha256 === decrypted.sha256 : null;
   } catch (e) {
     status.error = '쿠키 복호화 실패';
   }
+  status.lastUse = lastCookieUseByUser.get(username) || null;
   return status;
 }
 
@@ -589,11 +609,13 @@ async function saveEncryptedUserCookies(req, content) {
   const { normalized, size } = validateCookieContent(content);
   const encrypted = encryptUserCookies(normalized, req.session.cookieKey);
   const updatedAt = new Date().toISOString();
+  const diagnostics = cookieTextDiagnostics(normalized);
   await saveEncryptedCookieRecord(req.user.username, JSON.stringify(encrypted, null, 2), size, updatedAt);
   return {
     path: userCookiePath(req.user.username),
-    cookieCount: countCookieLines(normalized),
+    cookieCount: diagnostics.cookieCount,
     size,
+    sha256: diagnostics.sha256,
   };
 }
 
@@ -609,11 +631,35 @@ async function requestCookiesArgs(req) {
 
   const tempPath = path.join(os.tmpdir(), `sns-dl-cookies-${req.user.username}-${crypto.randomBytes(8).toString('hex')}.txt`);
   const content = await decryptUserCookiesFile(req.user.username, req.session.cookieKey);
+  const decoded = cookieTextDiagnostics(content);
   fs.writeFileSync(tempPath, content, 'utf8');
-  console.log(`[cookies] using user cookies username=${req.user.username} count=${countCookieLines(content)}`);
+  const fileDiagnostics = cookieTextDiagnostics(fs.readFileSync(tempPath, 'utf8'));
+  lastCookieUseByUser.set(req.user.username, {
+    usedAt: new Date().toISOString(),
+    path: tempPath,
+    pathExistsAtUse: fs.existsSync(tempPath),
+    decodedSha256: decoded.sha256,
+    fileSha256: fileDiagnostics.sha256,
+    hashMatch: decoded.sha256 === fileDiagnostics.sha256,
+    size: fileDiagnostics.size,
+    cookieCount: fileDiagnostics.cookieCount,
+    cleanupAt: null,
+    pathExistsAfterCleanup: null,
+  });
+  console.log(`[cookies] using user cookies username=${req.user.username} count=${fileDiagnostics.cookieCount} sha256=${fileDiagnostics.sha256.slice(0, 12)}`);
   return {
     args: ['--cookies', tempPath],
-    cleanup: () => { try { fs.unlinkSync(tempPath); } catch {} },
+    cleanup: () => {
+      try { fs.unlinkSync(tempPath); } catch {}
+      const previous = lastCookieUseByUser.get(req.user.username);
+      if (previous?.path === tempPath) {
+        lastCookieUseByUser.set(req.user.username, {
+          ...previous,
+          cleanupAt: new Date().toISOString(),
+          pathExistsAfterCleanup: fs.existsSync(tempPath),
+        });
+      }
+    },
   };
 }
 
@@ -1191,6 +1237,10 @@ app.post('/api/info', async (req, res) => {
                 cookieExists: !!userCookie?.exists,
                 cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
                 cookieCount: userCookie?.cookieCount || 0,
+                savedSha256: userCookie?.savedSha256 || null,
+                decryptedSha256: userCookie?.decryptedSha256 || null,
+                hashMatch: userCookie?.hashMatch ?? null,
+                lastUse: userCookie?.lastUse || null,
               },
             });
           }
@@ -1203,6 +1253,10 @@ app.post('/api/info', async (req, res) => {
               cookieExists: !!userCookie?.exists,
               cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
               cookieCount: userCookie?.cookieCount || 0,
+              savedSha256: userCookie?.savedSha256 || null,
+              decryptedSha256: userCookie?.decryptedSha256 || null,
+              hashMatch: userCookie?.hashMatch ?? null,
+              lastUse: userCookie?.lastUse || null,
             },
             needClose: retryErr.needClose || false,
             needSetup: retryErr.needSetup || false,
@@ -1223,6 +1277,10 @@ app.post('/api/info', async (req, res) => {
               cookieExists: !!userCookie?.exists,
               cookieDecryptOk: userCookie ? userCookie.decryptOk : null,
               cookieCount: userCookie?.cookieCount || 0,
+              savedSha256: userCookie?.savedSha256 || null,
+              decryptedSha256: userCookie?.decryptedSha256 || null,
+              hashMatch: userCookie?.hashMatch ?? null,
+              lastUse: userCookie?.lastUse || null,
             },
           });
         }
@@ -1491,6 +1549,25 @@ app.get('/api/settings/cookies', async (req, res) => {
   const c = loadConfig();
   const hasFile = !!(c.cookiesPath && fs.existsSync(c.cookiesPath));
   res.json({ path: hasFile ? c.cookiesPath : null });
+});
+
+app.get('/api/settings/cookies/diagnostics', async (req, res) => {
+  if (requiresUserAuth(req)) {
+    return res.json({
+      username: req.user?.username || null,
+      storageBackend: dbPool ? 'postgres' : 'file',
+      ...(await userCookieStatus(req)),
+    });
+  }
+  ensureEnvCookies();
+  const c = loadConfig();
+  res.json({
+    storageBackend: 'local',
+    args: cookiesArgs(),
+    envCookiesPath,
+    configCookiesPath: c.cookiesPath || null,
+    configCookiesBrowser: c.cookiesBrowser || null,
+  });
 });
 
 // ── GET /api/settings/pick-cookies-file ──────
