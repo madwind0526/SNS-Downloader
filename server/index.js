@@ -240,6 +240,44 @@ async function loadUsersStore() {
   return { users: result.rows.map(rowToUser) };
 }
 
+async function getStorageStatus() {
+  const status = {
+    backend: dbPool ? 'postgres' : 'file',
+    databaseUrlConfigured: !!DATABASE_URL,
+  };
+  if (!dbPool) {
+    const users = loadUsers().users;
+    let cookieFileCount = 0;
+    try {
+      cookieFileCount = fs.readdirSync(USER_COOKIES_DIR).filter(f => f.endsWith('.enc')).length;
+    } catch {}
+    return {
+      ...status,
+      ok: true,
+      userCount: users.length,
+      cookieRecordCount: cookieFileCount,
+      usersFileExists: fs.existsSync(USERS_FILE),
+    };
+  }
+  try {
+    await ensureDb();
+    const users = await dbPool.query('SELECT COUNT(*)::int AS count FROM sns_users');
+    const cookies = await dbPool.query('SELECT COUNT(*)::int AS count FROM sns_user_cookies');
+    return {
+      ...status,
+      ok: true,
+      userCount: Number(users.rows[0]?.count || 0),
+      cookieRecordCount: Number(cookies.rows[0]?.count || 0),
+    };
+  } catch (e) {
+    return {
+      ...status,
+      ok: false,
+      errorCode: e.code || e.name || 'DB_ERROR',
+    };
+  }
+}
+
 async function findUser(username) {
   const normalized = normalizeUsername(username);
   if (!dbPool) return loadUsers().users.find(u => u.username === normalized) || null;
@@ -798,7 +836,7 @@ app.use(attachUserSession);
 
 // User login is required on Render APIs. Windows PC mode stays local-first.
 app.use('/api', (req, res, next) => {
-  const publicPaths = ['/version', '/auth', '/users/bootstrap', '/users/register', '/users/login', '/users/logout', '/users/me'];
+  const publicPaths = ['/version', '/storage/status', '/auth', '/users/bootstrap', '/users/register', '/users/login', '/users/logout', '/users/me'];
   if (publicPaths.includes(req.path)) return next();
   userAuthMiddleware(req, res, next);
 });
@@ -811,6 +849,13 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // ── GET /api/version ─────────────────────────
 const { version } = require('../package.json');
 app.get('/api/version', (req, res) => res.json({ version, platform: process.platform }));
+
+// ── GET /api/storage/status ──────────────────
+// Reports safe storage diagnostics without exposing secrets.
+app.get('/api/storage/status', async (req, res) => {
+  const status = await getStorageStatus();
+  res.status(status.ok ? 200 : 500).json(status);
+});
 
 // ── User auth APIs ───────────────────────────
 app.get('/api/users/bootstrap', async (req, res) => {

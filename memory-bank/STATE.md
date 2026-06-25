@@ -2,14 +2,14 @@
 
 ## Current Wave
 
-- **Wave:** 12
+- **Wave:** 13
 - **Status:** Completed
 - **Cache Status:** CLEAN
-- **Last Checkpoint:** v1.18 Postgres-backed Render user/cookie persistence completed (2026-06-25)
+- **Last Checkpoint:** v1.19 Render storage diagnostics added (2026-06-25)
 
 ## Version
 
-- Current app version: `1.18`
+- Current app version: `1.19`
 - Local server: `http://localhost:3001`
 - Render server: `https://sns-downloader.onrender.com`
 
@@ -29,6 +29,7 @@
 | 10 | Render cookie status diagnostics and reset documentation | Completed | 2026-06-25 |
 | 11 | Tumblr 429 user guidance and throttled yt-dlp requests | Completed | 2026-06-25 |
 | 12 | Postgres-backed Render user and encrypted cookie persistence | Completed | 2026-06-25 |
+| 13 | Safe Render storage diagnostics endpoint | Completed | 2026-06-25 |
 
 ## Session Notes
 
@@ -49,3 +50,4 @@
 - 2026-06-25: Confirmed Render `/api/users/bootstrap` can return `needsAdmin:true` after deploy because runtime `server/data/` is ephemeral. Added cookie decrypt/count diagnostics without exposing cookie values.
 - 2026-06-25: Added Tumblr-specific yt-dlp sleep options and Korean 429 guidance for Render IP rate limiting.
 - 2026-06-25: Added optional `DATABASE_URL` Postgres storage for Render users and encrypted per-user cookies, with file fallback and one-time file-to-DB migration when DB is empty.
+- 2026-06-25: Added `/api/storage/status` to distinguish file fallback from Postgres storage without exposing secrets.
