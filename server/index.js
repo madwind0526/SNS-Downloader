@@ -144,6 +144,16 @@ function userAuthMiddleware(req, res, next) {
   res.status(401).json({ error: '로그인이 필요합니다.', needLogin: true });
 }
 
+function requireLocalhostOnly(req, res, next) {
+  if (isLocalhostRequest(req)) return next();
+  res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
+}
+
+function requireLocalhostOrServerAuth(req, res, next) {
+  if (isLocalhostRequest(req) || requiresUserAuth(req)) return next();
+  res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
+}
+
 // ── Rate limiting (Render only — no token = local, skip) ─
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -161,6 +171,15 @@ const downloadLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: '다운로드 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
   skip: () => !ACCESS_TOKEN,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+  skip: req => !requiresUserAuth(req),
 });
 
 // ── Concurrent download counter ───────────────
@@ -994,6 +1013,7 @@ app.use('/api', (req, res, next) => {
 });
 app.use('/api/info',     apiLimiter);
 app.use('/api/download', downloadLimiter);
+app.use(['/api/users/register', '/api/users/login'], authLimiter);
 
 // ── GET /health ──────────────────────────────
 app.get('/health', (req, res) => res.json({ ok: true }));
@@ -1006,6 +1026,14 @@ app.get('/api/version', (req, res) => res.json({ version, platform: process.plat
 // Reports safe storage diagnostics without exposing secrets.
 app.get('/api/storage/status', async (req, res) => {
   const status = await getStorageStatus();
+  if (requiresUserAuth(req) && req.user?.username !== 'admin') {
+    return res.status(status.ok ? 200 : 500).json({
+      backend: status.backend,
+      databaseUrlConfigured: status.databaseUrlConfigured,
+      ok: status.ok,
+      ...(status.ok ? {} : { errorCode: status.errorCode }),
+    });
+  }
   res.status(status.ok ? 200 : 500).json(status);
 });
 
@@ -1515,8 +1543,13 @@ app.post('/api/download', async (req, res) => {
   let stderr   = '';
   let responded = false;
   let cookieCleaned = false;
+  let slotReleased = false;
 
-  const releaseSlot = () => { activeDownloads = Math.max(0, activeDownloads - 1); };
+  const releaseSlot = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    activeDownloads = Math.max(0, activeDownloads - 1);
+  };
   const cleanupCookieBundle = () => {
     if (cookieCleaned) return;
     cookieCleaned = true;
@@ -1732,7 +1765,7 @@ app.get('/api/files', (req, res) => {
 
 // ── GET /api/settings/pick-app ───────────────
 // Opens Windows file picker and returns selected .exe path
-app.get('/api/settings/pick-app', (req, res) => {
+app.get('/api/settings/pick-app', requireLocalhostOnly, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const type  = req.query.type === 'image' ? 'image' : 'video';
   const title = type === 'image' ? '이미지 뷰어 선택' : '동영상 플레이어 선택';
@@ -1792,7 +1825,7 @@ app.get('/api/settings/cookies/diagnostics', async (req, res) => {
 
 // ── GET /api/settings/pick-cookies-file ──────
 // Opens Windows file picker starting in user's Downloads folder
-app.get('/api/settings/pick-cookies-file', (req, res) => {
+app.get('/api/settings/pick-cookies-file', requireLocalhostOnly, (req, res) => {
   if (process.platform !== 'win32') return res.json({ content: null });
   const downloadsDir = path.join(os.homedir(), 'Downloads');
   const script = [
@@ -1814,7 +1847,7 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
 
 // ── POST /api/settings/upload-cookies ────────
 // Receive cookies.txt content (text/plain or JSON {content}) and save to disk
-app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
+app.post('/api/settings/upload-cookies', requireLocalhostOrServerAuth, express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
   let content = typeof req.body === 'string' ? req.body : (req.body?.content || '');
   try {
     if (requiresUserAuth(req)) {
@@ -1832,7 +1865,7 @@ app.post('/api/settings/upload-cookies', express.text({ type: '*/*', limit: '1mb
 
 // ── POST /api/settings/auto-cookies ──────────
 // Manually trigger browser cookie extraction via yt-dlp
-app.post('/api/settings/auto-cookies', async (req, res) => {
+app.post('/api/settings/auto-cookies', requireLocalhostOnly, async (req, res) => {
   try {
     const browser = await extractCookiesViaBrowser();
     res.json({ ok: true, browser, count: '설정됨' });
@@ -1842,7 +1875,7 @@ app.post('/api/settings/auto-cookies', async (req, res) => {
 });
 
 // ── DELETE /api/settings/cookies ─────────────
-app.delete('/api/settings/cookies', async (req, res) => {
+app.delete('/api/settings/cookies', requireLocalhostOrServerAuth, async (req, res) => {
   if (requiresUserAuth(req)) {
     await removeEncryptedUserCookies(req.user.username);
     return res.json({ ok: true });
@@ -1860,7 +1893,7 @@ app.delete('/api/settings/cookies', async (req, res) => {
 
 // ── GET /api/settings/pick-cookies ───────────
 // Opens Windows file picker for cookies.txt and saves the path
-app.get('/api/settings/pick-cookies', (req, res) => {
+app.get('/api/settings/pick-cookies', requireLocalhostOnly, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const tmpPs1 = uniqueTempScriptPath('_picker_cookies');
   const script = [
@@ -1890,7 +1923,7 @@ app.get('/api/settings/download-folder', (req, res) => {
 
 // ── GET /api/settings/pick-download-folder ───
 // Opens Windows FolderBrowserDialog starting at current downloads folder
-app.get('/api/settings/pick-download-folder', (req, res) => {
+app.get('/api/settings/pick-download-folder', requireLocalhostOnly, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   // Single backslashes — PowerShell double-quoted strings don't need escaping
   const currentDir = getDownloadsDir();
@@ -1920,7 +1953,7 @@ app.get('/api/settings/pick-download-folder', (req, res) => {
 
 // ── GET /api/settings/open-downloads-folder ──
 // Opens the downloads folder in Windows Explorer
-app.get('/api/settings/open-downloads-folder', (req, res) => {
+app.get('/api/settings/open-downloads-folder', requireLocalhostOnly, (req, res) => {
   const dir = getDownloadsDir();
   if (process.platform === 'win32') {
     execFile('explorer.exe', [dir]);
@@ -1932,7 +1965,7 @@ app.get('/api/settings/open-downloads-folder', (req, res) => {
 
 // ── POST /api/files/open ─────────────────────
 // Open file with default app or specified app
-app.post('/api/files/open', (req, res) => {
+app.post('/api/files/open', requireLocalhostOnly, (req, res) => {
   const fp      = safeFilePath(req.body.filename);
   const appPath = req.body.appPath || '';
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
@@ -1957,7 +1990,7 @@ app.post('/api/files/open', (req, res) => {
 
 // ── POST /api/files/reveal ────────────────────
 // Reveal file in OS file explorer
-app.post('/api/files/reveal', (req, res) => {
+app.post('/api/files/reveal', requireLocalhostOnly, (req, res) => {
   const fp = safeFilePath(req.body.filename);
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
 
@@ -1997,11 +2030,12 @@ app.post('/api/files/clear', (req, res) => {
 
 // ── HTTP helper (follows redirects) ──────────
 async function httpGetFollowRedirects(url, maxRedirects = 5) {
-  await ensurePublicHttpUrl(url);
+  const checked = await resolvePublicHttpUrl(url);
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? https : http;
-    const req = mod.get(url, {
+    const mod = checked.parsed.protocol === 'https:' ? https : http;
+    const req = mod.get(checked.parsed, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      lookup: (hostname, options, callback) => callback(null, checked.address, checked.family),
       timeout: 15000,
     }, res => {
       if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location && maxRedirects > 0) {
@@ -2085,12 +2119,34 @@ async function extractImagesFromPage(url) {
 }
 
 // ── SSRF guard — block private/loopback/link-local IPs ──
+function normalizeIpHost(hostname) {
+  return String(hostname || '').replace(/^\[(.*)\]$/, '$1');
+}
+
+function ipv4FromMappedIpv6(address) {
+  const normalized = normalizeIpHost(address).toLowerCase();
+  const dotted = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return dotted[1];
+  const hex = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return null;
+  const high = parseInt(hex[1], 16);
+  const low = parseInt(hex[2], 16);
+  if (Number.isNaN(high) || Number.isNaN(low)) return null;
+  return [
+    (high >> 8) & 255,
+    high & 255,
+    (low >> 8) & 255,
+    low & 255,
+  ].join('.');
+}
+
 function isPrivateHost(urlStr) {
   try {
     const parsed = new URL(urlStr);
     if (!['http:', 'https:'].includes(parsed.protocol)) return true;
-    const host = parsed.hostname;
+    const host = normalizeIpHost(parsed.hostname);
     if (/^(localhost|.*\.local)$/i.test(host)) return true;
+    if (net.isIP(host) && isPrivateIpAddress(host)) return true;
     const private4 = [
       /^127\./,
       /^10\./,
@@ -2107,15 +2163,18 @@ function isPrivateHost(urlStr) {
 
 function isPrivateIpAddress(address) {
   if (!address) return true;
-  if (net.isIP(address) === 4) {
-    return /^127\./.test(address) ||
-      /^10\./.test(address) ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
-      /^192\.168\./.test(address) ||
-      /^169\.254\./.test(address) ||
-      /^0\./.test(address);
+  const ipAddress = normalizeIpHost(address);
+  const mappedIpv4 = ipv4FromMappedIpv6(ipAddress);
+  if (mappedIpv4) return isPrivateIpAddress(mappedIpv4);
+  if (net.isIP(ipAddress) === 4) {
+    return /^127\./.test(ipAddress) ||
+      /^10\./.test(ipAddress) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(ipAddress) ||
+      /^192\.168\./.test(ipAddress) ||
+      /^169\.254\./.test(ipAddress) ||
+      /^0\./.test(ipAddress);
   }
-  const normalized = address.toLowerCase();
+  const normalized = ipAddress.toLowerCase();
   return normalized === '::1' ||
     normalized.startsWith('fc') ||
     normalized.startsWith('fd') ||
@@ -2128,17 +2187,23 @@ function isPrivateIpAddress(address) {
     normalized.startsWith('::ffff:0.');
 }
 
-async function ensurePublicHttpUrl(urlStr) {
+async function resolvePublicHttpUrl(urlStr) {
   if (isPrivateHost(urlStr)) throw new Error('blocked private host');
   const parsed = new URL(urlStr);
-  if (net.isIP(parsed.hostname)) {
-    if (isPrivateIpAddress(parsed.hostname)) throw new Error('blocked private host');
-    return;
+  const hostname = normalizeIpHost(parsed.hostname);
+  if (net.isIP(hostname)) {
+    if (isPrivateIpAddress(hostname)) throw new Error('blocked private host');
+    return { parsed, address: hostname, family: net.isIP(hostname) };
   }
-  const addresses = await dns.lookup(parsed.hostname, { all: true });
+  const addresses = await dns.lookup(hostname, { all: true });
   if (!addresses.length || addresses.some(entry => isPrivateIpAddress(entry.address))) {
     throw new Error('blocked private host');
   }
+  return { parsed, address: addresses[0].address, family: addresses[0].family };
+}
+
+async function ensurePublicHttpUrl(urlStr) {
+  await resolvePublicHttpUrl(urlStr);
 }
 
 // ── Direct URL download (images from CDN) ─────
