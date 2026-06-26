@@ -906,7 +906,7 @@ function showSuccess(count, blob, pcFile, serverDownloads = []) {
     }
   } else if (pcFile) {
     // PC: preview from server endpoint
-    const previewUrl = `/api/files/download/${encodeURIComponent(pcFile.filename)}`;
+    const previewUrl = withAuthToken(`/api/files/download/${encodeURIComponent(pcFile.filename)}`);
     if (pcFile.mediaType === 'image') {
       previewImage.src           = previewUrl;
       previewImage.style.display = 'block';

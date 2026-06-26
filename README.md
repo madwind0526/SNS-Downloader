@@ -1,4 +1,4 @@
-# SNS Downloader v1.23
+# SNS Downloader v1.26
 
 SNS 영상/이미지를 다운로드하는 Node.js + yt-dlp 기반 웹앱입니다.
 

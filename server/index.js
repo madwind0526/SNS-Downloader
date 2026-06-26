@@ -3,12 +3,14 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 const express  = require('express');
 const cors     = require('cors');
 const path     = require('path');
-const { execFile, spawn, exec, execSync } = require('child_process');
+const { execFile, spawn, execSync } = require('child_process');
 const fs       = require('fs');
 const crypto   = require('crypto');
 const https    = require('https');
 const http     = require('http');
 const os       = require('os');
+const dns      = require('dns').promises;
+const net      = require('net');
 const QRCode   = require('qrcode');
 const { rateLimit } = require('express-rate-limit');
 const { Pool } = require('pg');
@@ -26,6 +28,18 @@ const COOKIE_UPLOAD_LIMIT_BYTES = 1024 * 1024;
 const sessions = new Map();
 const lastCookieUseByUser = new Map();
 const recentYtDlpDiagnostics = [];
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, session] of sessions.entries()) {
+    if (now - session.lastSeenAt > SESSION_TTL_MS) sessions.delete(sid);
+  }
+  for (const [username, usage] of lastCookieUseByUser.entries()) {
+    if (!usage?.usedAt || now - new Date(usage.usedAt).getTime() > SESSION_TTL_MS) {
+      lastCookieUseByUser.delete(username);
+    }
+  }
+}, 60 * 60 * 1000).unref?.();
 
 function isLocalhostRequest(req) {
   const ip = req.ip || req.socket?.remoteAddress || '';
@@ -59,6 +73,26 @@ function rememberYtDlpDiagnostic(entry) {
 
 function tailText(text, limit = 1500) {
   return String(text || '').slice(-limit);
+}
+
+function uniqueTempScriptPath(prefix) {
+  return path.join(getDownloadsDir(), `${prefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.ps1`);
+}
+
+function runPowerShellFile(scriptPath, options, callback) {
+  execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], options, callback);
+}
+
+function psString(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+function openPathWithDefaultApp(filePath, callback = () => {}) {
+  if (process.platform === 'win32') {
+    execFile('rundll32.exe', ['url.dll,FileProtocolHandler', filePath], callback);
+  } else {
+    execFile('xdg-open', [filePath], callback);
+  }
 }
 
 function parseCookies(req) {
@@ -929,7 +963,24 @@ process.on('unhandledRejection', reason => {
   console.error('[UNHANDLED REJECTION]', reason);
 });
 
-app.use(cors());
+const configuredOrigins = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(v => v.trim())
+  .filter(Boolean);
+const renderOrigins = [
+  'https://sns-downloader.onrender.com',
+  'https://sns-downloader-us.onrender.com',
+  ...configuredOrigins,
+];
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || process.platform === 'win32' || renderOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  credentials: true,
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -1179,17 +1230,24 @@ app.post('/api/info', async (req, res) => {
     const cookieBundle = withCookies ? await requestCookiesArgs(req) : { args: [], cleanup: () => {} };
     return new Promise((resolve, reject) => {
       const args = [...BASE_ARGS, ...cookieBundle.args, url];
-      execFile(YT_DLP, args,
-        { timeout: 90000, maxBuffer: 50 * 1024 * 1024 }, // 50MB — YouTube has many formats
-        (err, stdout, stderr) => {
-          cookieBundle.cleanup();
-          if (err) {
-            console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
-            return reject(stderr || err.message);
+      try {
+        execFile(YT_DLP, args,
+          { timeout: 90000, maxBuffer: 50 * 1024 * 1024 },
+          (err, stdout, stderr) => {
+            cookieBundle.cleanup();
+            if (err) {
+              console.error('[info] yt-dlp error:', err.message, '| stderr:', (stderr || '').slice(0, 300));
+              return reject(stderr || err.message);
+            }
+            resolve(stdout);
           }
-          resolve(stdout);
-        }
-      );
+        );
+      } catch (e) {
+        try {
+          cookieBundle.cleanup();
+        } catch {}
+        reject(e);
+      }
     });
   };
 
@@ -1425,7 +1483,12 @@ app.post('/api/download', async (req, res) => {
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
-    return downloadDirectUrl(downloadUrl, title, res, isLocalhostReq, prepareOnly);
+    activeDownloads++;
+    try {
+      return await downloadDirectUrl(downloadUrl, title, res, isLocalhostReq, prepareOnly);
+    } finally {
+      activeDownloads = Math.max(0, activeDownloads - 1);
+    }
   }
 
   const sessionId = crypto.randomBytes(8).toString('hex');
@@ -1555,20 +1618,33 @@ app.post('/api/download', async (req, res) => {
     res.setHeader('X-Filesize', fileSize);
 
     const stream = fs.createReadStream(finalPath);
+    let finalFileCleaned = false;
+    const cleanupFinalFile = () => {
+      if (finalFileCleaned || keepFile) return;
+      finalFileCleaned = true;
+      try { fs.unlinkSync(finalPath); } catch {}
+    };
     stream.pipe(res);
 
     stream.on('end', () => {
-      if (!keepFile) { try { fs.unlinkSync(finalPath); } catch {} }
+      cleanupFinalFile();
       console.log(`[download] stream complete${keepFile ? ', file kept on PC' : ', temp deleted'}`);
     });
     stream.on('error', err => {
       console.error('[download] stream error:', err.message);
+      cleanupFinalFile();
       if (!res.headersSent) res.status(500).json({ error: '파일 전송 실패' });
       else res.destroy();
+    });
+    stream.on('close', cleanupFinalFile);
+    res.on('close', () => {
+      stream.destroy();
+      cleanupFinalFile();
     });
     res.on('error', err => {
       console.error('[download] response error (client disconnected):', err.message);
       stream.destroy();
+      cleanupFinalFile();
     });
   });
 });
@@ -1591,20 +1667,48 @@ app.get('/api/files/download/:filename', (req, res) => {
   const range = req.headers.range;
   const match = range?.match(/bytes=(\d*)-(\d*)/);
   if (match) {
-    const start = match[1] ? parseInt(match[1], 10) : 0;
-    const end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+    let start;
+    let end;
+    if (!match[1] && match[2]) {
+      const suffixLen = parseInt(match[2], 10);
+      start = Math.max(0, fileSize - suffixLen);
+      end = fileSize - 1;
+    } else {
+      start = match[1] ? parseInt(match[1], 10) : 0;
+      end = match[2] ? parseInt(match[2], 10) : fileSize - 1;
+    }
     if (start <= end && end < fileSize) {
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
       res.setHeader('Content-Length', end - start + 1);
-      return fs.createReadStream(fp, { start, end }).pipe(res);
+      const partialStream = fs.createReadStream(fp, { start, end });
+      if (deleteAfter) {
+        const cleanupFile = () => { try { fs.unlinkSync(fp); } catch {} };
+        partialStream.on('end', cleanupFile);
+        partialStream.on('close', cleanupFile);
+        partialStream.on('error', cleanupFile);
+        res.on('close', cleanupFile);
+      }
+      return partialStream.pipe(res);
     }
+    res.status(416);
+    res.setHeader('Content-Range', `bytes */${fileSize}`);
+    return res.end();
   }
   const stream = fs.createReadStream(fp);
   stream.pipe(res);
-  stream.on('end', () => {
-    if (deleteAfter) { try { fs.unlinkSync(fp); } catch {} }
-  });
+  if (deleteAfter) {
+    let cleaned = false;
+    const cleanupFile = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try { fs.unlinkSync(fp); } catch {}
+    };
+    stream.on('end', cleanupFile);
+    stream.on('close', cleanupFile);
+    stream.on('error', cleanupFile);
+    res.on('close', cleanupFile);
+  }
 });
 
 // ── GET /api/files ────────────────────────────
@@ -1632,11 +1736,11 @@ app.get('/api/settings/pick-app', (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const type  = req.query.type === 'image' ? 'image' : 'video';
   const title = type === 'image' ? '이미지 뷰어 선택' : '동영상 플레이어 선택';
-  const tmpPs1 = path.join(getDownloadsDir(), '_picker_tmp.ps1');
+  const tmpPs1 = uniqueTempScriptPath('_picker_app');
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    `$d.Title = "${title}"`,
+    `$d.Title = ${psString(title)}`,
     '$d.Filter = "실행 파일 (*.exe)|*.exe"',
     '$d.InitialDirectory = $env:ProgramFiles',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
@@ -1644,7 +1748,7 @@ app.get('/api/settings/pick-app', (req, res) => {
   try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch (e) {
     return res.json({ path: null });
   }
-  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
+  runPowerShellFile(tmpPs1, { timeout: 60000 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
     const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
     res.json({ path: picked || null });
@@ -1694,14 +1798,14 @@ app.get('/api/settings/pick-cookies-file', (req, res) => {
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    `$d.InitialDirectory = "${downloadsDir.replace(/\\/g, '\\\\')}"`,
+    `$d.InitialDirectory = ${psString(downloadsDir)}`,
     '$d.Title = "쿠키 파일 선택 (cookies.txt)"',
     '$d.Filter = "cookies.txt|cookies.txt|텍스트 파일 (*.txt)|*.txt|모든 파일 (*.*)|*.*"',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Get-Content $d.FileName -Raw }',
   ].join('\n');
-  const tmpPs1 = path.join(getDownloadsDir(), `_picker_${Date.now()}.ps1`);
+  const tmpPs1 = uniqueTempScriptPath('_picker_cookie_file');
   try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch { return res.json({ content: null }); }
-  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout) => {
+  runPowerShellFile(tmpPs1, { timeout: 60000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
     const content = (stdout || '').trim();
     res.json({ content: content || null });
@@ -1758,7 +1862,7 @@ app.delete('/api/settings/cookies', async (req, res) => {
 // Opens Windows file picker for cookies.txt and saves the path
 app.get('/api/settings/pick-cookies', (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
-  const tmpPs1 = path.join(getDownloadsDir(), '_picker_cookies.ps1');
+  const tmpPs1 = uniqueTempScriptPath('_picker_cookies');
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
@@ -1767,7 +1871,7 @@ app.get('/api/settings/pick-cookies', (req, res) => {
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
   ].join('\n');
   try { fs.writeFileSync(tmpPs1, script, 'utf8'); } catch { return res.json({ path: null }); }
-  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
+  runPowerShellFile(tmpPs1, { timeout: 60000 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
     const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
     if (picked) {
@@ -1794,14 +1898,14 @@ app.get('/api/settings/pick-download-folder', (req, res) => {
     'Add-Type -AssemblyName System.Windows.Forms',
     '$d = New-Object System.Windows.Forms.FolderBrowserDialog',
     '$d.Description = "Download folder"',
-    `$d.SelectedPath = "${currentDir}"`,
+    `$d.SelectedPath = ${psString(currentDir)}`,
     '$d.ShowNewFolderButton = $true',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
   ].join('\r\n');
-  const tmpPs1 = path.join(getDownloadsDir(), `_fpick_${Date.now()}.ps1`);
+  const tmpPs1 = uniqueTempScriptPath('_fpick');
   // Write UTF-16 LE with BOM — PowerShell reads this correctly on all Windows locales
   try { fs.writeFileSync(tmpPs1, Buffer.from('﻿' + script, 'utf16le')); } catch { return res.json({ path: null }); }
-  exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpPs1}"`, { timeout: 60000 }, (err, stdout) => {
+  runPowerShellFile(tmpPs1, { timeout: 60000 }, (err, stdout) => {
     try { fs.unlinkSync(tmpPs1); } catch {}
     const picked = (stdout || '').trim().replace(/\r?\n.*$/s, '');
     if (picked) {
@@ -1835,12 +1939,18 @@ app.post('/api/files/open', (req, res) => {
 
   if (process.platform === 'win32') {
     if (appPath && fs.existsSync(appPath)) {
-      exec(`"${appPath.replace(/"/g, '\\"')}" "${fp.replace(/"/g, '\\"')}"`);
+      execFile(appPath, [fp], err => {
+        if (err) console.error('[files/open] app error:', err.message);
+      });
     } else {
-      exec(`start "" "${fp.replace(/"/g, '\\"')}"`);
+      openPathWithDefaultApp(fp, err => {
+        if (err) console.error('[files/open] default app error:', err.message);
+      });
     }
   } else {
-    exec(`xdg-open "${fp.replace(/"/g, '\\"')}"`);
+    execFile('xdg-open', [fp], err => {
+      if (err) console.error('[files/open] xdg-open error:', err.message);
+    });
   }
   res.json({ ok: true });
 });
@@ -1886,7 +1996,8 @@ app.post('/api/files/clear', (req, res) => {
 });
 
 // ── HTTP helper (follows redirects) ──────────
-function httpGetFollowRedirects(url, maxRedirects = 5) {
+async function httpGetFollowRedirects(url, maxRedirects = 5) {
+  await ensurePublicHttpUrl(url);
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
@@ -1897,6 +2008,10 @@ function httpGetFollowRedirects(url, maxRedirects = 5) {
         const next = res.headers.location.startsWith('http')
           ? res.headers.location
           : new URL(res.headers.location, url).href;
+        if (isPrivateHost(next)) {
+          res.resume();
+          return reject(new Error('blocked private redirect'));
+        }
         res.resume();
         return httpGetFollowRedirects(next, maxRedirects - 1).then(resolve).catch(reject);
       }
@@ -1911,12 +2026,25 @@ function httpGetFollowRedirects(url, maxRedirects = 5) {
 // Used when yt-dlp reports "No video could be found" (image-only pages)
 async function extractImagesFromPage(url) {
   try {
+    if (isPrivateHost(url)) return [];
     const res = await httpGetFollowRedirects(url);
     if (res.statusCode !== 200) return [];
 
     const chunks = [];
+    let total = 0;
     res.setEncoding('utf8');
-    await new Promise(r => { res.on('data', d => chunks.push(d)); res.on('end', r); });
+    await new Promise((resolve, reject) => {
+      res.on('data', d => {
+        total += Buffer.byteLength(d, 'utf8');
+        if (total > 512 * 1024) {
+          res.destroy();
+          return reject(new Error('image fallback response too large'));
+        }
+        chunks.push(d);
+      });
+      res.on('end', resolve);
+      res.on('error', reject);
+    });
     const html = chunks.join('').slice(0, 400000);
 
     const seen    = new Set();
@@ -1959,7 +2087,9 @@ async function extractImagesFromPage(url) {
 // ── SSRF guard — block private/loopback/link-local IPs ──
 function isPrivateHost(urlStr) {
   try {
-    const host = new URL(urlStr).hostname;
+    const parsed = new URL(urlStr);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return true;
+    const host = parsed.hostname;
     if (/^(localhost|.*\.local)$/i.test(host)) return true;
     const private4 = [
       /^127\./,
@@ -1975,12 +2105,49 @@ function isPrivateHost(urlStr) {
   } catch { return true; }
 }
 
+function isPrivateIpAddress(address) {
+  if (!address) return true;
+  if (net.isIP(address) === 4) {
+    return /^127\./.test(address) ||
+      /^10\./.test(address) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(address) ||
+      /^192\.168\./.test(address) ||
+      /^169\.254\./.test(address) ||
+      /^0\./.test(address);
+  }
+  const normalized = address.toLowerCase();
+  return normalized === '::1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe80:') ||
+    normalized.startsWith('::ffff:127.') ||
+    normalized.startsWith('::ffff:10.') ||
+    normalized.startsWith('::ffff:192.168.') ||
+    /^::ffff:172\.(1[6-9]|2\d|3[01])\./.test(normalized) ||
+    normalized.startsWith('::ffff:169.254.') ||
+    normalized.startsWith('::ffff:0.');
+}
+
+async function ensurePublicHttpUrl(urlStr) {
+  if (isPrivateHost(urlStr)) throw new Error('blocked private host');
+  const parsed = new URL(urlStr);
+  if (net.isIP(parsed.hostname)) {
+    if (isPrivateIpAddress(parsed.hostname)) throw new Error('blocked private host');
+    return;
+  }
+  const addresses = await dns.lookup(parsed.hostname, { all: true });
+  if (!addresses.length || addresses.some(entry => isPrivateIpAddress(entry.address))) {
+    throw new Error('blocked private host');
+  }
+}
+
 // ── Direct URL download (images from CDN) ─────
 async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepareOnly = false) {
   if (isPrivateHost(url)) {
     return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
   }
   let responded = false;
+  let finalPath = null;
   try {
     const imgRes = await httpGetFollowRedirects(url);
     if (imgRes.statusCode !== 200) throw new Error(`HTTP ${imgRes.statusCode}`);
@@ -1996,7 +2163,7 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
     while (fs.existsSync(path.join(getDownloadsDir(), finalName))) {
       finalName = `${baseName} (${counter++}).${ext}`;
     }
-    const finalPath  = path.join(getDownloadsDir(), finalName);
+    finalPath = path.join(getDownloadsDir(), finalName);
     const fileStream = fs.createWriteStream(finalPath);
 
     await new Promise((resolve, reject) => {
@@ -2034,13 +2201,30 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
     res.setHeader('X-Filesize', fileSize);
 
     const readStream = fs.createReadStream(finalPath);
+    let finalFileCleaned = false;
+    const cleanupFinalFile = () => {
+      if (finalFileCleaned || keepFile) return;
+      finalFileCleaned = true;
+      try { fs.unlinkSync(finalPath); } catch {}
+    };
     readStream.pipe(res);
-    readStream.on('end', () => { if (!keepFile) { try { fs.unlinkSync(finalPath); } catch {} } });
+    readStream.on('end', cleanupFinalFile);
+    readStream.on('close', cleanupFinalFile);
     readStream.on('error', err => {
       console.error('[download-direct] stream error:', err.message);
+      cleanupFinalFile();
+      if (!res.headersSent) res.status(500).json({ error: '파일 전송 실패' });
+      else res.destroy();
+    });
+    res.on('close', () => {
+      readStream.destroy();
+      cleanupFinalFile();
     });
   } catch (err) {
     console.error('[download-direct] error:', err.message);
+    if (finalPath && fs.existsSync(finalPath)) {
+      try { fs.unlinkSync(finalPath); } catch {}
+    }
     if (!responded && !res.headersSent) {
       res.status(500).json({ error: `이미지 다운로드 실패: ${err.message}` });
     }
