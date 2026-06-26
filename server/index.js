@@ -188,7 +188,10 @@ function requireLocalhostOrServerAuth(req, res, next) {
 }
 
 function requireLocalhostOrAuthenticatedServerAction(req, res, next) {
-  if (requiresUserAuth(req)) return next();
+  if (requiresUserAuth(req)) {
+    if (!req.user) return res.status(401).json({ error: '로그인이 필요합니다.', needLogin: true });
+    return next();
+  }
   return requireLocalhostAction(req, res, next);
 }
 
@@ -1292,10 +1295,18 @@ app.get('/api/localip', (req, res) => {
 });
 
 // ── GET /api/qr ──────────────────────────────
-// Returns an SVG QR code for the given URL
+// Returns an SVG QR code — only for trusted origins (localhost and known Render URL).
 app.get('/api/qr', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'url required' });
+  const allowedPrefixes = [
+    `http://localhost:${PORT}`,
+    `http://127.0.0.1:${PORT}`,
+    'https://sns-downloader.onrender.com',
+  ];
+  if (!allowedPrefixes.some(p => url.startsWith(p))) {
+    return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
+  }
   try {
     const svg = await QRCode.toString(url, {
       type: 'svg', margin: 2,
@@ -1650,7 +1661,10 @@ app.post('/api/download', async (req, res) => {
   proc.on('error', () => { releaseSlot(); cleanupCookieBundle(); });
   res.on('close', () => { if (!responded) proc.kill(); });
 
-  proc.stderr.on('data', d => { stderr += d.toString(); });
+  proc.stderr.on('data', d => {
+    stderr += d.toString();
+    if (stderr.length > 65536) stderr = stderr.slice(-65536);
+  });
 
   proc.on('error', err => {
     console.error('[download] spawn error:', err.message);
@@ -2084,7 +2098,7 @@ app.post('/api/files/reveal', requireLocalhostAction, (req, res) => {
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
 
   if (process.platform === 'win32') {
-    execFile('explorer.exe', [`/select,${fp}`]);
+    execFile('explorer.exe', ['/select,', fp]);
   } else {
     execFile('xdg-open', [path.dirname(fp)]);
   }
