@@ -149,9 +149,56 @@ function requireLocalhostOnly(req, res, next) {
   res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
 }
 
+function isAllowedBrowserSource(req) {
+  const secFetchSite = String(req.get('sec-fetch-site') || '').toLowerCase();
+  if (secFetchSite && !['same-origin', 'same-site', 'none'].includes(secFetchSite)) return false;
+
+  const source = req.get('origin') || req.get('referer');
+  if (!source) return !secFetchSite;
+
+  try {
+    const src = new URL(source);
+    const host = String(req.get('host') || '').toLowerCase();
+    const srcHost = src.host.toLowerCase();
+    const srcHostname = src.hostname.toLowerCase();
+    const expectedPort = String(PORT);
+    return srcHost === host ||
+      ((srcHostname === 'localhost' || srcHostname === '127.0.0.1' || srcHostname === '[::1]') &&
+        (!src.port || src.port === expectedPort));
+  } catch {
+    return false;
+  }
+}
+
+function requireLocalhostAction(req, res, next) {
+  if (!isLocalhostRequest(req)) {
+    return res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
+  }
+  if (!isAllowedBrowserSource(req)) {
+    return res.status(403).json({ error: '허용되지 않는 요청입니다.' });
+  }
+  next();
+}
+
 function requireLocalhostOrServerAuth(req, res, next) {
   if (isLocalhostRequest(req) || requiresUserAuth(req)) return next();
   res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
+}
+
+function requireLocalhostOrAuthenticatedServerAction(req, res, next) {
+  if (requiresUserAuth(req)) return next();
+  return requireLocalhostAction(req, res, next);
+}
+
+function reserveDownloadSlot() {
+  if (activeDownloads >= MAX_CONCURRENT) return null;
+  activeDownloads++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeDownloads = Math.max(0, activeDownloads - 1);
+  };
 }
 
 // ── Rate limiting (Render only — no token = local, skip) ─
@@ -973,6 +1020,16 @@ function getDownloadsDir() {
 }
 getDownloadsDir(); // ensure default dir exists on startup
 
+function getRequestDownloadsDir(req) {
+  const baseDir = getDownloadsDir();
+  if (requiresUserAuth(req) && req.user?.username) {
+    const userDir = path.join(baseDir, 'users', req.user.username.replace(/[^a-z0-9_-]/gi, '_'));
+    if (!fs.existsSync(userDir)) try { fs.mkdirSync(userDir, { recursive: true }); } catch {}
+    return userDir;
+  }
+  return baseDir;
+}
+
 // Keep server alive — log unhandled errors instead of crashing
 process.on('uncaughtException', err => {
   console.error('[UNCAUGHT]', err.message, err.stack);
@@ -993,7 +1050,20 @@ const renderOrigins = [
 ];
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || process.platform === 'win32' || renderOrigins.includes(origin)) {
+    if (!origin || renderOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    if (process.platform === 'win32') {
+      try {
+        const parsed = new URL(origin);
+        const hostname = parsed.hostname.toLowerCase();
+        if ((hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') &&
+            (!parsed.port || parsed.port === String(PORT))) {
+          return callback(null, true);
+        }
+      } catch {}
+    }
+    if (!origin) {
       return callback(null, true);
     }
     return callback(null, false);
@@ -1004,6 +1074,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use(attachUserSession);
+app.use('/api', (req, res, next) => {
+  const mutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  if (process.platform === 'win32' && mutatingMethods.has(req.method) && !isAllowedBrowserSource(req)) {
+    return res.status(403).json({ error: '허용되지 않는 요청입니다.' });
+  }
+  next();
+});
 
 // User login is required on Render APIs. Windows PC mode stays local-first.
 app.use('/api', (req, res, next) => {
@@ -1237,12 +1314,18 @@ app.post('/api/info', async (req, res) => {
 
   // ── Threads custom handler (yt-dlp has no extractor for threads.com) ──────
   if (isThreadsUrl(url)) {
+    let cookieBundle = { args: [], cleanup: () => {} };
     try {
-      const result = await fetchThreadsInfo(url, getActiveCookiesFilePath());
+      cookieBundle = await requestCookiesArgs(req);
+      const cookiesArgIndex = cookieBundle.args.indexOf('--cookies');
+      const cookiePath = cookiesArgIndex >= 0 ? cookieBundle.args[cookiesArgIndex + 1] : getActiveCookiesFilePath();
+      const result = await fetchThreadsInfo(url, cookiePath);
       return res.json(result);
     } catch (e) {
       console.error('[threads] error:', e.message);
       return res.status(400).json({ error: e.message || 'Threads 영상을 가져오지 못했습니다.' });
+    } finally {
+      cookieBundle.cleanup();
     }
   }
 
@@ -1500,31 +1583,38 @@ app.post('/api/download', async (req, res) => {
   const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
   if (!downloadUrl) return res.status(400).json({ error: 'URL이 필요합니다.' });
 
-  if (activeDownloads >= MAX_CONCURRENT) {
+  const releaseSlot = reserveDownloadSlot();
+  if (!releaseSlot) {
     return res.status(429).json({ error: `지금 다운로드가 많습니다(${MAX_CONCURRENT}개 한도). 잠시 후 다시 시도해주세요.` });
   }
 
-  console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title} active=${activeDownloads + 1}`);
+  console.log(`[download] start — format=${format} mediaType=${req.body.mediaType} title=${title} active=${activeDownloads}`);
 
   // Detect if request came from the local PC browser (vs WiFi phone or Render)
   const isLocalhostReq = isLocalhostRequest(req);
+  const downloadDir = getRequestDownloadsDir(req);
 
   // Direct download for: image CDN URLs, or synthesized 'direct' format (e.g. Instagram carousel)
   if ((req.body.mediaType === 'image' || format === 'direct') && /^https?:\/\//.test(downloadUrl)) {
-    activeDownloads++;
     try {
-      return await downloadDirectUrl(downloadUrl, title, res, isLocalhostReq, prepareOnly);
+      return await downloadDirectUrl(downloadUrl, title, res, isLocalhostReq, prepareOnly, downloadDir);
     } finally {
-      activeDownloads = Math.max(0, activeDownloads - 1);
+      releaseSlot();
     }
   }
 
   const sessionId = crypto.randomBytes(8).toString('hex');
-  const outTemplate = path.join(getDownloadsDir(), `${sessionId}.%(ext)s`);
+  const outTemplate = path.join(downloadDir, `${sessionId}.%(ext)s`);
 
   const isAudioOnly = (format || '').startsWith('bestaudio');
   const isImage     = req.body.mediaType === 'image';
-  const cookieBundle = await requestCookiesArgs(req);
+  let cookieBundle;
+  try {
+    cookieBundle = await requestCookiesArgs(req);
+  } catch (e) {
+    releaseSlot();
+    return res.status(e.statusCode || 400).json({ error: e.message || '쿠키를 불러올 수 없습니다.' });
+  }
   const args = [
     '--no-playlist', '--no-warnings',
     '--retries', '3', '--fragment-retries', '5',
@@ -1538,18 +1628,17 @@ app.post('/api/download', async (req, res) => {
   if (!isAudioOnly && !isImage) args.push('--merge-output-format', 'mp4');
   if (isAudioOnly)              args.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
 
-  activeDownloads++;
-  const proc = spawn(YT_DLP, args);
+  let proc;
+  try {
+    proc = spawn(YT_DLP, args);
+  } catch (e) {
+    releaseSlot();
+    cookieBundle.cleanup();
+    return res.status(500).json({ error: `yt-dlp 실행 실패: ${e.message}` });
+  }
   let stderr   = '';
   let responded = false;
   let cookieCleaned = false;
-  let slotReleased = false;
-
-  const releaseSlot = () => {
-    if (slotReleased) return;
-    slotReleased = true;
-    activeDownloads = Math.max(0, activeDownloads - 1);
-  };
   const cleanupCookieBundle = () => {
     if (cookieCleaned) return;
     cookieCleaned = true;
@@ -1588,14 +1677,14 @@ app.post('/api/download', async (req, res) => {
           lastUse: lastCookieUseByUser.get(req.user.username) || null,
         } : null,
       });
-      cleanup(sessionId);
+      cleanup(sessionId, downloadDir);
       return res.status(400).json({ error: parseYtDlpError(stderr, downloadUrl) });
     }
 
     // Find the output file — exclude .part files (yt-dlp temp)
     let files;
     try {
-      files = fs.readdirSync(getDownloadsDir())
+      files = fs.readdirSync(downloadDir)
         .filter(f => f.startsWith(sessionId) && !f.endsWith('.part'));
     } catch (e) {
       console.error('[download] readdirSync failed:', e.message);
@@ -1613,11 +1702,11 @@ app.post('/api/download', async (req, res) => {
     // Ensure unique filename
     let finalName  = `${baseName}.${ext}`;
     let counter    = 1;
-    while (fs.existsSync(path.join(getDownloadsDir(), finalName))) {
+    while (fs.existsSync(path.join(downloadDir, finalName))) {
       finalName = `${baseName} (${counter++}).${ext}`;
     }
-    const srcPath  = path.join(getDownloadsDir(), files[0]);
-    const dstPath  = path.join(getDownloadsDir(), finalName);
+    const srcPath  = path.join(downloadDir, files[0]);
+    const dstPath  = path.join(downloadDir, finalName);
     try { fs.renameSync(srcPath, dstPath); } catch { /* keep original name */ }
     const finalPath = fs.existsSync(dstPath) ? dstPath : srcPath;
     const finalFile = path.basename(finalPath);
@@ -1685,7 +1774,7 @@ app.post('/api/download', async (req, res) => {
 // ── GET /api/files/download/:filename ────────
 // Re-download a file from server to browser
 app.get('/api/files/download/:filename', (req, res) => {
-  const fp = safeFilePath(decodeURIComponent(req.params.filename));
+  const fp = safeFilePath(decodeURIComponent(req.params.filename), req);
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
   const ext      = path.extname(fp).slice(1);
   const fileSize = fs.statSync(fp).size;
@@ -1748,10 +1837,11 @@ app.get('/api/files/download/:filename', (req, res) => {
 // List files in downloads/ sorted by newest first
 app.get('/api/files', (req, res) => {
   try {
-    const files = fs.readdirSync(getDownloadsDir())
+    const dir = getRequestDownloadsDir(req);
+    const files = fs.readdirSync(dir)
       .filter(f => !f.endsWith('.part') && !f.startsWith('.'))
       .map(f => {
-        const fp   = path.join(getDownloadsDir(), f);
+        const fp   = path.join(dir, f);
         const stat = fs.statSync(fp);
         return { filename: f, size: stat.size, mtime: stat.mtime.toISOString(), ext: path.extname(f).slice(1) };
       })
@@ -1765,7 +1855,7 @@ app.get('/api/files', (req, res) => {
 
 // ── GET /api/settings/pick-app ───────────────
 // Opens Windows file picker and returns selected .exe path
-app.get('/api/settings/pick-app', requireLocalhostOnly, (req, res) => {
+app.get('/api/settings/pick-app', requireLocalhostAction, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const type  = req.query.type === 'image' ? 'image' : 'video';
   const title = type === 'image' ? '이미지 뷰어 선택' : '동영상 플레이어 선택';
@@ -1825,7 +1915,7 @@ app.get('/api/settings/cookies/diagnostics', async (req, res) => {
 
 // ── GET /api/settings/pick-cookies-file ──────
 // Opens Windows file picker starting in user's Downloads folder
-app.get('/api/settings/pick-cookies-file', requireLocalhostOnly, (req, res) => {
+app.get('/api/settings/pick-cookies-file', requireLocalhostAction, (req, res) => {
   if (process.platform !== 'win32') return res.json({ content: null });
   const downloadsDir = path.join(os.homedir(), 'Downloads');
   const script = [
@@ -1865,7 +1955,7 @@ app.post('/api/settings/upload-cookies', requireLocalhostOrServerAuth, express.t
 
 // ── POST /api/settings/auto-cookies ──────────
 // Manually trigger browser cookie extraction via yt-dlp
-app.post('/api/settings/auto-cookies', requireLocalhostOnly, async (req, res) => {
+app.post('/api/settings/auto-cookies', requireLocalhostAction, async (req, res) => {
   try {
     const browser = await extractCookiesViaBrowser();
     res.json({ ok: true, browser, count: '설정됨' });
@@ -1893,7 +1983,7 @@ app.delete('/api/settings/cookies', requireLocalhostOrServerAuth, async (req, re
 
 // ── GET /api/settings/pick-cookies ───────────
 // Opens Windows file picker for cookies.txt and saves the path
-app.get('/api/settings/pick-cookies', requireLocalhostOnly, (req, res) => {
+app.get('/api/settings/pick-cookies', requireLocalhostAction, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   const tmpPs1 = uniqueTempScriptPath('_picker_cookies');
   const script = [
@@ -1918,12 +2008,14 @@ app.get('/api/settings/pick-cookies', requireLocalhostOnly, (req, res) => {
 
 // ── GET /api/settings/download-folder ────────
 app.get('/api/settings/download-folder', (req, res) => {
+  if (!isLocalhostRequest(req)) return res.json({ path: null });
+  if (!isAllowedBrowserSource(req)) return res.status(403).json({ error: '허용되지 않는 요청입니다.' });
   res.json({ path: getDownloadsDir() });
 });
 
 // ── GET /api/settings/pick-download-folder ───
 // Opens Windows FolderBrowserDialog starting at current downloads folder
-app.get('/api/settings/pick-download-folder', requireLocalhostOnly, (req, res) => {
+app.get('/api/settings/pick-download-folder', requireLocalhostAction, (req, res) => {
   if (process.platform !== 'win32') return res.json({ path: null });
   // Single backslashes — PowerShell double-quoted strings don't need escaping
   const currentDir = getDownloadsDir();
@@ -1953,7 +2045,7 @@ app.get('/api/settings/pick-download-folder', requireLocalhostOnly, (req, res) =
 
 // ── GET /api/settings/open-downloads-folder ──
 // Opens the downloads folder in Windows Explorer
-app.get('/api/settings/open-downloads-folder', requireLocalhostOnly, (req, res) => {
+app.get('/api/settings/open-downloads-folder', requireLocalhostAction, (req, res) => {
   const dir = getDownloadsDir();
   if (process.platform === 'win32') {
     execFile('explorer.exe', [dir]);
@@ -1965,8 +2057,8 @@ app.get('/api/settings/open-downloads-folder', requireLocalhostOnly, (req, res) 
 
 // ── POST /api/files/open ─────────────────────
 // Open file with default app or specified app
-app.post('/api/files/open', requireLocalhostOnly, (req, res) => {
-  const fp      = safeFilePath(req.body.filename);
+app.post('/api/files/open', requireLocalhostAction, (req, res) => {
+  const fp      = safeFilePath(req.body.filename, req);
   const appPath = req.body.appPath || '';
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
 
@@ -1990,8 +2082,8 @@ app.post('/api/files/open', requireLocalhostOnly, (req, res) => {
 
 // ── POST /api/files/reveal ────────────────────
 // Reveal file in OS file explorer
-app.post('/api/files/reveal', requireLocalhostOnly, (req, res) => {
-  const fp = safeFilePath(req.body.filename);
+app.post('/api/files/reveal', requireLocalhostAction, (req, res) => {
+  const fp = safeFilePath(req.body.filename, req);
   if (!fp || !fs.existsSync(fp)) return res.status(404).json({ error: '파일 없음' });
 
   if (process.platform === 'win32') {
@@ -2004,8 +2096,8 @@ app.post('/api/files/reveal', requireLocalhostOnly, (req, res) => {
 
 // ── POST /api/files/delete ────────────────────
 // Delete a specific file from downloads/
-app.post('/api/files/delete', (req, res) => {
-  const fp = safeFilePath(req.body.filename);
+app.post('/api/files/delete', requireLocalhostOrAuthenticatedServerAction, (req, res) => {
+  const fp = safeFilePath(req.body.filename, req);
   if (!fp) return res.status(400).json({ error: '잘못된 파일명' });
   try {
     fs.unlinkSync(fp);
@@ -2017,11 +2109,12 @@ app.post('/api/files/delete', (req, res) => {
 
 // ── POST /api/files/clear ─────────────────────
 // Delete all files in downloads/
-app.post('/api/files/clear', (req, res) => {
+app.post('/api/files/clear', requireLocalhostOrAuthenticatedServerAction, (req, res) => {
   try {
-    fs.readdirSync(getDownloadsDir())
+    const dir = getRequestDownloadsDir(req);
+    fs.readdirSync(dir)
       .filter(f => !f.startsWith('.'))
-      .forEach(f => { try { fs.unlinkSync(path.join(getDownloadsDir(), f)); } catch {} });
+      .forEach(f => { try { fs.unlinkSync(path.join(dir, f)); } catch {} });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -2207,7 +2300,9 @@ async function ensurePublicHttpUrl(urlStr) {
 }
 
 // ── Direct URL download (images from CDN) ─────
-async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepareOnly = false) {
+const MAX_DIRECT_DOWNLOAD_BYTES = Number(process.env.MAX_DIRECT_DOWNLOAD_BYTES || 300 * 1024 * 1024);
+
+async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepareOnly = false, downloadDir = getDownloadsDir()) {
   if (isPrivateHost(url)) {
     return res.status(400).json({ error: '허용되지 않는 URL입니다.' });
   }
@@ -2218,20 +2313,34 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
     if (imgRes.statusCode !== 200) throw new Error(`HTTP ${imgRes.statusCode}`);
 
     const contentType = imgRes.headers['content-type'] || 'image/jpeg';
+    const contentLength = Number(imgRes.headers['content-length'] || 0);
+    if (contentLength > MAX_DIRECT_DOWNLOAD_BYTES) {
+      imgRes.resume();
+      return res.status(413).json({ error: '파일이 너무 큽니다.' });
+    }
     const extFromType = contentType.split('/')[1]?.split(';')[0]?.trim().replace('jpeg', 'jpg') || 'jpg';
     const extFromUrl  = url.split('?')[0].split('.').pop().toLowerCase();
-    const ext = /^(jpg|jpeg|png|gif|webp|bmp)$/.test(extFromUrl) ? extFromUrl : extFromType;
+    const ext = /^(jpg|jpeg|png|gif|webp|bmp|mp4|webm|mov|m4v|mp3|m4a)$/.test(extFromUrl)
+      ? extFromUrl
+      : extFromType;
 
     const baseName = sanitizeFilename(title || 'image');
     let finalName  = `${baseName}.${ext}`;
     let counter    = 1;
-    while (fs.existsSync(path.join(getDownloadsDir(), finalName))) {
+    while (fs.existsSync(path.join(downloadDir, finalName))) {
       finalName = `${baseName} (${counter++}).${ext}`;
     }
-    finalPath = path.join(getDownloadsDir(), finalName);
+    finalPath = path.join(downloadDir, finalName);
     const fileStream = fs.createWriteStream(finalPath);
 
     await new Promise((resolve, reject) => {
+      let downloaded = 0;
+      imgRes.on('data', chunk => {
+        downloaded += chunk.length;
+        if (downloaded > MAX_DIRECT_DOWNLOAD_BYTES) {
+          imgRes.destroy(new Error('direct download too large'));
+        }
+      });
       imgRes.pipe(fileStream);
       fileStream.on('finish', resolve);
       fileStream.on('error', reject);
@@ -2297,11 +2406,11 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
 }
 
 // ── Helpers ──────────────────────────────────
-function safeFilePath(filename) {
+function safeFilePath(filename, req = null) {
   if (!filename) return null;
   const base = path.basename(filename);
   if (!base || base === '.' || base === '..') return null;
-  return path.join(getDownloadsDir(), base);
+  return path.join(req ? getRequestDownloadsDir(req) : getDownloadsDir(), base);
 }
 
 function parseYtDlpError(stderr, url = '') {
@@ -2348,11 +2457,11 @@ function sanitizeFilename(name) {
   return name.replace(/[\\/:*?"<>|]/g, '_').slice(0, 100);
 }
 
-function cleanup(sessionId) {
+function cleanup(sessionId, dir = getDownloadsDir()) {
   try {
-    fs.readdirSync(getDownloadsDir())
+    fs.readdirSync(dir)
       .filter(f => f.startsWith(sessionId))
-      .forEach(f => fs.unlinkSync(path.join(getDownloadsDir(), f)));
+      .forEach(f => fs.unlinkSync(path.join(dir, f)));
   } catch {}
 }
 
@@ -2395,7 +2504,7 @@ if ($p -and $p.MainWindowHandle -ne 0) {
 
 // ── GET /api/open-chrome ─────────────────────
 // Spawn a new Chrome app-mode window for the PC platform button.
-app.get('/api/open-chrome', (req, res) => {
+app.get('/api/open-chrome', requireLocalhostAction, (req, res) => {
   if (process.platform !== 'win32') return res.json({ ok: false, reason: 'windows-only' });
   const localData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
   const chromePaths = [

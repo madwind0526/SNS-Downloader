@@ -1,4 +1,4 @@
-# SNS Downloader v1.27
+# SNS Downloader v1.28
 
 SNS 영상/이미지를 다운로드하는 Node.js + yt-dlp 기반 웹앱입니다.
 
@@ -129,7 +129,7 @@ services:
     name: sns-downloader
     env: node
     plan: free
-    buildCommand: apt-get install -y ffmpeg && npm install && pip install yt-dlp
+    buildCommand: npm install && pip install -U yt-dlp
     startCommand: node server/index.js
 ```
 

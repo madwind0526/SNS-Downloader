@@ -1,16 +1,29 @@
 const https = require('https');
 const http  = require('http');
 const fs    = require('fs');
+const dns   = require('dns').promises;
+const net   = require('net');
 
 // Match Threads post URLs: threads.com/@user/post/CODE
 function isThreadsUrl(url) {
-  return /threads\.com\/@[^/]+\/post\/[A-Za-z0-9_-]+/.test(url);
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return (host === 'threads.com' || host === 'www.threads.com') &&
+      /^\/@[^/]+\/post\/[A-Za-z0-9_-]+\/?$/.test(parsed.pathname);
+  } catch {
+    return false;
+  }
 }
 
 // Extract the @username from URL for display
 function extractUploader(url) {
-  const m = url.match(/threads\.com\/@([^/?#]+)/);
-  return m ? `@${m[1]}` : '';
+  try {
+    const m = new URL(url).pathname.match(/^\/@([^/]+)\/post\//);
+    return m ? `@${m[1]}` : '';
+  } catch {
+    return '';
+  }
 }
 
 // Parse Netscape cookies.txt → Cookie header string for threads.com
@@ -38,31 +51,89 @@ function buildCookieHeader(cookiePath) {
   }
 }
 
-// Only follow redirects to these trusted hosts (prevents SSRF)
-const ALLOWED_REDIRECT_HOSTS = /(?:threads\.com|threads\.net|cdninstagram\.com|fbcdn\.net)$/i;
+const ALLOWED_REDIRECT_BASES = ['threads.com', 'threads.net', 'cdninstagram.com', 'fbcdn.net'];
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5 MB cap — Threads pages are ~850 KB
 
+function isAllowedHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return ALLOWED_REDIRECT_BASES.some(base => host === base || host.endsWith(`.${base}`));
+}
+
+function normalizeIpHost(hostname) {
+  return String(hostname || '').replace(/^\[(.*)\]$/, '$1');
+}
+
+function ipv4FromMappedIpv6(address) {
+  const normalized = normalizeIpHost(address).toLowerCase();
+  const dotted = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) return dotted[1];
+  const hex = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (!hex) return null;
+  const high = parseInt(hex[1], 16);
+  const low = parseInt(hex[2], 16);
+  if (Number.isNaN(high) || Number.isNaN(low)) return null;
+  return [
+    (high >> 8) & 255,
+    high & 255,
+    (low >> 8) & 255,
+    low & 255,
+  ].join('.');
+}
+
+function isPrivateIpAddress(address) {
+  if (!address) return true;
+  const ipAddress = normalizeIpHost(address);
+  const mappedIpv4 = ipv4FromMappedIpv6(ipAddress);
+  if (mappedIpv4) return isPrivateIpAddress(mappedIpv4);
+  if (net.isIP(ipAddress) === 4) {
+    return /^127\./.test(ipAddress) ||
+      /^10\./.test(ipAddress) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(ipAddress) ||
+      /^192\.168\./.test(ipAddress) ||
+      /^169\.254\./.test(ipAddress) ||
+      /^0\./.test(ipAddress);
+  }
+  const normalized = ipAddress.toLowerCase();
+  return normalized === '::1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe80:');
+}
+
+async function resolveTrustedPublicUrl(targetUrl) {
+  let parsed;
+  try { parsed = new URL(targetUrl); } catch { throw new Error(`Invalid URL: ${targetUrl}`); }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error(`Invalid protocol: ${parsed.protocol}`);
+  if (!isAllowedHost(parsed.hostname)) throw new Error(`Disallowed redirect host: ${parsed.hostname}`);
+
+  const hostname = normalizeIpHost(parsed.hostname);
+  if (net.isIP(hostname)) {
+    if (isPrivateIpAddress(hostname)) throw new Error('Blocked private host');
+    return { parsed, address: hostname, family: net.isIP(hostname) };
+  }
+
+  const addresses = await dns.lookup(hostname, { all: true });
+  if (!addresses.length || addresses.some(entry => isPrivateIpAddress(entry.address))) {
+    throw new Error('Blocked private host');
+  }
+  return { parsed, address: addresses[0].address, family: addresses[0].family };
+}
+
 // GET a URL with cookies; follows up to 5 redirects; returns { status, body }
-function fetchUrl(targetUrl, cookieHeader, redirectCount) {
+async function fetchUrl(targetUrl, cookieHeader, redirectCount) {
   if (redirectCount === undefined) redirectCount = 0;
+  if (redirectCount > 5) throw new Error('Too many redirects');
+  const checked = await resolveTrustedPublicUrl(targetUrl);
+  const parsed = checked.parsed;
   return new Promise((resolve, reject) => {
-    if (redirectCount > 5) return reject(new Error('Too many redirects'));
-
-    let parsed;
-    try { parsed = new URL(targetUrl); } catch { return reject(new Error(`Invalid URL: ${targetUrl}`)); }
-
-    // Block SSRF: only allow requests to Threads/Meta CDN hosts
-    if (!ALLOWED_REDIRECT_HOSTS.test(parsed.hostname)) {
-      return reject(new Error(`Disallowed redirect host: ${parsed.hostname}`));
-    }
-
     const lib  = parsed.protocol === 'https:' ? https : http;
     const opts = {
       hostname: parsed.hostname,
       path:     parsed.pathname + parsed.search,
       method:   'GET',
       timeout:  20000,
+      lookup:   (hostname, options, callback) => callback(null, checked.address, checked.family),
       headers: {
         'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

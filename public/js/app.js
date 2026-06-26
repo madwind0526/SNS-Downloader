@@ -434,7 +434,7 @@ fetch('/api/version').then(r => r.json()).then(d => {
   if (av) av.textContent = v;
   if (d.platform === 'win32') {
     isPCServer = true;
-    setupPCServerUI();
+    if (isLocal) setupPCServerUI();
   }
   updateFolderSections();
   updateConnectionBadge();
@@ -1256,6 +1256,13 @@ async function renderFiles() {
           `).join('')}`;
         return;
       }
+      if (isPCServer) {
+        container.innerHTML = `
+          <div class="placeholder">
+            <p>PC 서버에 준비된 파일이 없습니다</p>
+          </div>`;
+        return;
+      }
     } catch {}
 
     if (!canUsePhoneFolderPicker()) {
@@ -1520,10 +1527,20 @@ refreshMobileFolderUI();
 function updateFolderSections() {
   const pcSec = $('folderSection');
   const mobileSec = $('mobileFolderSection');
-  if (pcSec) pcSec.style.display = '';
-  if (mobileSec) mobileSec.style.display = '';
-  refreshFolderUI();
+  const showPcFolder = isLocal;
+  if (pcSec) pcSec.style.display = showPcFolder ? '' : 'none';
+  if (mobileSec) mobileSec.style.display = isLocal ? 'none' : '';
+  if (showPcFolder) refreshFolderUI();
   refreshMobileFolderUI();
+
+  const showPcSettings = isLocal;
+  ['videoPlayerSection', 'imageViewerSection'].forEach(id => {
+    const el = $(id);
+    if (el) el.style.display = showPcSettings ? '' : 'none';
+  });
+
+  const clearFilesBtn = $('clearFilesBtn');
+  if (clearFilesBtn) clearFilesBtn.style.display = isPCServer && !isLocal ? 'none' : '';
 }
 
 updateFolderSections();

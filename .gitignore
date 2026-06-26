@@ -16,3 +16,7 @@ server/data/
 *.enc
 code-review.md
 .vs/
+/AGENTS.md
+/index.html
+/css/
+/js/
