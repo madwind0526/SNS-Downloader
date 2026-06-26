@@ -142,9 +142,29 @@ function isTumblrUrl(url) {
   try { return /(^|\.)tumblr\.com$/i.test(new URL(url).hostname); } catch { return false; }
 }
 
+function isYouTubeUrl(url) {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, '');
+    return h === 'youtube.com' || h === 'youtu.be' || h === 'm.youtube.com';
+  } catch { return false; }
+}
+
+// Returns extra yt-dlp args for sites that need special handling on Render (Linux datacenter IP).
+// YouTube: ios/android clients bypass BotGuard PO-Token requirement that blocks datacenter IPs.
+// Tumblr:  sleep flags reduce 429 rate-limit errors; mobile UA avoids some IP-reputation blocks.
 function throttledSiteArgs(url) {
-  if (!isTumblrUrl(url)) return [];
-  return ['--sleep-requests', '2', '--sleep-interval', '2', '--max-sleep-interval', '6'];
+  const args = [];
+  if (isYouTubeUrl(url) && process.platform !== 'win32') {
+    args.push('--extractor-args', 'youtube:player_client=ios,android');
+  }
+  if (isTumblrUrl(url)) {
+    args.push('--sleep-requests', '2', '--sleep-interval', '2', '--max-sleep-interval', '6');
+    if (process.platform !== 'win32') {
+      args.push('--user-agent',
+        'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36');
+    }
+  }
+  return args;
 }
 
 // Simple server-side config (cookies path, etc.)
