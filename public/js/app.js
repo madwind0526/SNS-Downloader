@@ -9,6 +9,7 @@ const PHONE_FOLDER_STORE = 'handles';
 const PHONE_FOLDER_KEY = 'phone-folder';
 const PHONE_DEFAULT_PATH = '/storage/emulated/0/Documents/SNS-Downloader';
 let remoteAuthRequired = false;
+let cachedVersion = '';
 
 function canUsePhoneFolderPicker() {
   return window.isSecureContext && typeof window.showDirectoryPicker === 'function';
@@ -88,7 +89,7 @@ async function showAuthScreen() {
         padding:32px;
       ">
         <div style="font-size:2rem;font-weight:900;color:var(--text)">SNS</div>
-        <div style="font-size:1rem;color:var(--text-sub)">Downloader</div>
+        <div style="font-size:1rem;color:var(--text-sub)">Downloader <span id="authVersion" style="font-size:.8rem;opacity:.55">${cachedVersion}</span></div>
         <p style="color:var(--text-sub);font-size:.9rem;margin-top:8px">${isRegister ? '사용자 등록' : '로그인'}</p>
         <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:320px">
           <input id="authUsername" type="text" autocomplete="username" placeholder="사용자 이름"
@@ -423,10 +424,13 @@ const authReady = initAuth().catch(() => {}); // show auth screen before anythin
 // ── Version ───────────────────────────────────
 fetch('/api/version').then(r => r.json()).then(d => {
   const v  = `v${d.version}`;
+  cachedVersion = v;
   const el = $('appVersion');
   const pl = $('plVersion');
+  const av = $('authVersion');
   if (el) el.textContent = v;
   if (pl) pl.textContent = v;
+  if (av) av.textContent = v;
   if (d.platform === 'win32') {
     isPCServer = true;
     setupPCServerUI();
