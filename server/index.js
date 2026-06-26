@@ -150,15 +150,15 @@ function isYouTubeUrl(url) {
 }
 
 // Returns extra yt-dlp args for sites that need special handling on Render (Linux datacenter IP).
-// YouTube: ios/android clients bypass BotGuard PO-Token requirement that blocks datacenter IPs.
-// Tumblr:  sleep flags reduce 429 rate-limit errors; mobile UA avoids some IP-reputation blocks.
+// YouTube: tv/tv_embedded clients have lighter BotGuard requirements than web/ios/android clients.
+// Tumblr:  longer sleep reduces 429 rate-limit errors; mobile UA improves IP-reputation score.
 function throttledSiteArgs(url) {
   const args = [];
   if (isYouTubeUrl(url) && process.platform !== 'win32') {
-    args.push('--extractor-args', 'youtube:player_client=ios,android');
+    args.push('--extractor-args', 'youtube:player_client=tv,tv_embedded');
   }
   if (isTumblrUrl(url)) {
-    args.push('--sleep-requests', '2', '--sleep-interval', '2', '--max-sleep-interval', '6');
+    args.push('--sleep-requests', '5', '--sleep-interval', '5', '--max-sleep-interval', '10');
     if (process.platform !== 'win32') {
       args.push('--user-agent',
         'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.6478.122 Mobile Safari/537.36');
@@ -1348,7 +1348,7 @@ app.post('/api/info', async (req, res) => {
             });
           }
           return res.status(400).json({
-            error: parseYtDlpError(msg),
+            error: parseYtDlpError(msg, url),
             diagnostics: {
               firstErrorKind,
               retryErrorKind,
@@ -1391,7 +1391,7 @@ app.post('/api/info', async (req, res) => {
         if (errText.includes('[Pinterest]')) return res.status(400).json({ error: 'Pinterest 이미지 핀은 지원되지 않습니다.' });
         return res.status(400).json({ error: '이 포스트에서 미디어를 찾을 수 없습니다.' });
       } else {
-        return res.status(400).json({ error: parseYtDlpError(errText) });
+        return res.status(400).json({ error: parseYtDlpError(errText, url) });
       }
     }
 
@@ -1493,7 +1493,7 @@ app.post('/api/download', async (req, res) => {
         } : null,
       });
       cleanup(sessionId);
-      return res.status(400).json({ error: parseYtDlpError(stderr) });
+      return res.status(400).json({ error: parseYtDlpError(stderr, downloadUrl) });
     }
 
     // Find the output file — exclude .part files (yt-dlp temp)
@@ -2055,18 +2055,33 @@ function safeFilePath(filename) {
   return path.join(getDownloadsDir(), base);
 }
 
-function parseYtDlpError(stderr) {
+function parseYtDlpError(stderr, url = '') {
   if (!stderr) return '알 수 없는 오류';
-  if (stderr.includes('HTTP Error 429') || stderr.includes('Too Many Requests')) {
-    return 'Tumblr가 Render 서버 요청을 잠시 제한했습니다. 잠시 후 다시 시도하거나 PC mode / Phone via PC를 사용하세요.';
+  const isRender = process.platform !== 'win32';
+  const s = String(stderr);
+
+  if (s.includes('HTTP Error 429') || s.includes('Too Many Requests')) {
+    if (isRender) return '서버 IP가 요청을 제한했습니다 (429). 잠시 후 다시 시도하거나 PC 모드를 사용해주세요.';
+    return '요청이 너무 많습니다 (429). 잠시 후 다시 시도해주세요.';
   }
-  if (stderr.includes('Private video'))                  return '비공개 영상입니다.';
-  if (stderr.includes('This video is not available'))    return '이 지역에서 재생할 수 없는 영상입니다.';
-  if (stderr.includes('Unsupported URL'))                return '지원하지 않는 URL입니다.';
-  if (stderr.includes('HTTP Error 404'))                 return '영상을 찾을 수 없습니다.';
-  if (stderr.includes('Sign in'))                        return '로그인이 필요한 영상입니다.';
-  if (stderr.includes('age'))                            return '연령 제한 영상입니다.';
-  if (stderr.includes('ffmpeg') || stderr.includes('ffprobe')) return 'ffmpeg가 필요합니다.';
+  if (s.includes('Sign in') || s.includes('login_required') || s.includes('LOGIN_REQUIRED') ||
+      s.includes('This video is only available') || s.includes('confirm you') ) {
+    if (isRender && isYouTubeUrl(url)) {
+      return 'YouTube가 서버 IP를 차단하고 있습니다. PC 모드를 사용해주세요.';
+    }
+    return '로그인이 필요한 영상입니다. 쿠키를 등록해주세요.';
+  }
+  if (s.includes('age') || s.includes('age-restricted') || s.includes('confirm your age')) {
+    if (isRender) {
+      return `연령 제한 콘텐츠입니다. 서버 IP가 차단되었을 수 있습니다. PC 모드를 사용해주세요.`;
+    }
+    return '연령 제한 영상입니다. 로그인된 쿠키가 필요합니다.';
+  }
+  if (s.includes('Private video'))               return '비공개 영상입니다.';
+  if (s.includes('This video is not available')) return '이 지역에서 재생할 수 없는 영상입니다.';
+  if (s.includes('Unsupported URL'))             return '지원하지 않는 URL입니다.';
+  if (s.includes('HTTP Error 404'))              return '영상을 찾을 수 없습니다.';
+  if (s.includes('ffmpeg') || s.includes('ffprobe')) return 'ffmpeg가 필요합니다.';
   return '영상을 가져올 수 없습니다. URL을 확인해주세요.';
 }
 
