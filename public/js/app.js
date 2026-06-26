@@ -90,6 +90,7 @@ async function showAuthScreen() {
       ">
         <div style="font-size:2rem;font-weight:900;color:var(--text)">SNS</div>
         <div style="font-size:1rem;color:var(--text-sub)">Downloader <span id="authVersion" style="font-size:.8rem;opacity:.55">${cachedVersion}</span></div>
+        <div style="font-size:.75rem;opacity:.4;margin-top:4px;letter-spacing:.03em">by MadwindUnexpected</div>
         <p style="color:var(--text-sub);font-size:.9rem;margin-top:8px">${isRegister ? '사용자 등록' : '로그인'}</p>
         <div style="display:flex;flex-direction:column;gap:10px;width:100%;max-width:320px">
           <input id="authUsername" type="text" autocomplete="username" placeholder="사용자 이름"
