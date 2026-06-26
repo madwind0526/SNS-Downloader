@@ -181,8 +181,10 @@ function requireLocalhostAction(req, res, next) {
 }
 
 function requireLocalhostOrServerAuth(req, res, next) {
-  if (isLocalhostRequest(req) || requiresUserAuth(req)) return next();
-  res.status(403).json({ error: 'PC에서만 사용할 수 있습니다.' });
+  if (isLocalhostRequest(req)) return next();
+  // On Render: user must be authenticated, not just auth-required
+  if (requiresUserAuth(req) && req.user) return next();
+  res.status(403).json({ error: requiresUserAuth(req) ? '로그인이 필요합니다.' : 'PC에서만 사용할 수 있습니다.' });
 }
 
 function requireLocalhostOrAuthenticatedServerAction(req, res, next) {
@@ -1804,13 +1806,8 @@ app.get('/api/files/download/:filename', (req, res) => {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${fileSize}`);
       res.setHeader('Content-Length', end - start + 1);
       const partialStream = fs.createReadStream(fp, { start, end });
-      if (deleteAfter) {
-        const cleanupFile = () => { try { fs.unlinkSync(fp); } catch {} };
-        partialStream.on('end', cleanupFile);
-        partialStream.on('close', cleanupFile);
-        partialStream.on('error', cleanupFile);
-        res.on('close', cleanupFile);
-      }
+      // Do not delete on range requests — player may issue multiple seeks.
+      // File is cleaned up only on the full-file response path below.
       return partialStream.pipe(res);
     }
     res.status(416);
@@ -2391,6 +2388,11 @@ async function downloadDirectUrl(url, title, res, isLocalhostReq = false, prepar
       else res.destroy();
     });
     res.on('close', () => {
+      readStream.destroy();
+      cleanupFinalFile();
+    });
+    res.on('error', err => {
+      console.error('[download-direct] response error:', err.message);
       readStream.destroy();
       cleanupFinalFile();
     });
