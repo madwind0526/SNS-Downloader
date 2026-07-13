@@ -1674,6 +1674,13 @@ app.post('/api/info', async (req, res) => {
               console.log('[info] image fallback succeeded after cookie retry:', imageItems.length, 'item(s)');
               return res.json({ items: imageItems });
             }
+            if (isTumblrUrl(url)) {
+              const tumblrItems = await extractTumblrPageMedia(url, req);
+              if (tumblrItems.length) {
+                console.log('[info] tumblr page media fallback succeeded after cookie retry:', tumblrItems.length, 'item(s)');
+                return res.json({ items: tumblrItems });
+              }
+            }
           }
           if (retryErrorKind === 'no_video' && isTumblrUrl(url)) {
             return res.status(400).json({
@@ -1716,6 +1723,13 @@ app.post('/api/info', async (req, res) => {
         if (imageItems.length) {
           console.log('[info] image fallback succeeded:', imageItems.length, 'item(s)');
           return res.json({ items: imageItems });
+        }
+        if (isTumblrUrl(url)) {
+          const tumblrItems = await extractTumblrPageMedia(url, req);
+          if (tumblrItems.length) {
+            console.log('[info] tumblr page media fallback succeeded:', tumblrItems.length, 'item(s)');
+            return res.json({ items: tumblrItems });
+          }
         }
         const images = await extractImagesFromPage(url);
         if (images.length) return res.json({ items: images });
@@ -2312,12 +2326,15 @@ app.post('/api/files/clear', requireLocalhostOrAuthenticatedServerAction, (req, 
 });
 
 // ── HTTP helper (follows redirects) ──────────
-async function httpGetFollowRedirects(url, maxRedirects = 5) {
+async function httpGetFollowRedirects(url, maxRedirects = 5, extraHeaders = {}) {
   const checked = await resolvePublicHttpUrl(url);
   return new Promise((resolve, reject) => {
     const mod = checked.parsed.protocol === 'https:' ? https : http;
     const req = mod.get(checked.parsed, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        ...extraHeaders,
+      },
       // Node >= 20 autoSelectFamily calls lookup with options.all=true and
       // expects an array callback; passing a bare string there fails with
       // "Invalid IP address: undefined".
@@ -2406,6 +2423,116 @@ async function extractImagesFromPage(url) {
   } catch (e) {
     console.error('[extractImages] error:', e.message);
     return [];
+  }
+}
+
+// ── Tumblr animated-image fallback ────────────
+// Posts that look like videos on Tumblr are often animated webp images
+// (no video block at all), which yt-dlp cannot extract. Parse media URLs
+// from the post page; mature-labeled posts require logged-in cookies.
+function buildTumblrCookieHeader(cookiePath) {
+  if (!cookiePath || !fs.existsSync(cookiePath)) return '';
+  try {
+    const pairs = [];
+    for (const line of fs.readFileSync(cookiePath, 'utf8').split('\n')) {
+      if (!line || line.startsWith('#')) continue;
+      const parts = line.split('\t');
+      if (parts.length < 7) continue;
+      const bare = parts[0].replace(/^\./, '');
+      if (bare === 'tumblr.com' || bare.endsWith('.tumblr.com')) {
+        pairs.push(`${parts[5]}=${parts[6].trim()}`);
+      }
+    }
+    return pairs.join('; ');
+  } catch { return ''; }
+}
+
+// Media URL shape: .../{hash1}/{hash2}/s{W}x{H}[_c1][_f1]/{hash3}
+// _f1 = animated variant (served from 44.media), _c1 = cropped thumbnail.
+function parseTumblrMediaFromHtml(html) {
+  const urls = html.match(/https:\/\/\d+\.media\.tumblr\.com\/[A-Za-z0-9_./-]+/g) || [];
+  const groups = new Map();
+  for (const u of urls) {
+    if (u.includes('/avatar_')) continue;
+    const m = u.match(/media\.tumblr\.com\/([a-f0-9]+)\/([A-Za-z0-9-]+)\/s(\d+)x(\d+)([a-z0-9_]*)\//);
+    if (!m) continue;
+    const key = `${m[1]}/${m[2]}`;
+    const flags = m[5] || '';
+    const cand = {
+      url: u,
+      area: Number(m[3]) * Number(m[4]),
+      animated: flags.includes('_f1'),
+      cropped: flags.includes('_c1'),
+    };
+    const isBetter = (a, b) => {
+      if (!b) return true;
+      if (a.animated !== b.animated) return a.animated;
+      if (a.cropped !== b.cropped) return !a.cropped;
+      return a.area > b.area;
+    };
+    const g = groups.get(key) || {};
+    if (isBetter(cand, g.best)) g.best = cand;
+    if (!cand.animated && !cand.cropped && cand.area > (g.staticBest?.area || 0)) g.staticBest = cand;
+    groups.set(key, g);
+  }
+  return [...groups.values()].filter(g => g.best);
+}
+
+async function extractTumblrPageMedia(urlStr, req) {
+  let cookieBundle = { args: [], cleanup: () => {} };
+  try {
+    try { cookieBundle = await requestCookiesArgs(req); } catch {}
+    const cookiesArgIndex = cookieBundle.args.indexOf('--cookies');
+    const cookiePath = cookiesArgIndex >= 0 ? cookieBundle.args[cookiesArgIndex + 1] : getActiveCookiesFilePath();
+    const cookieHeader = buildTumblrCookieHeader(cookiePath);
+
+    const res = await httpGetFollowRedirects(urlStr, 5, cookieHeader ? { Cookie: cookieHeader } : {});
+    if (res.statusCode !== 200) {
+      res.resume();
+      return [];
+    }
+    const chunks = [];
+    let total = 0;
+    res.setEncoding('utf8');
+    await new Promise((resolve, reject) => {
+      res.on('data', d => {
+        total += Buffer.byteLength(d, 'utf8');
+        if (total > 3 * 1024 * 1024) {
+          res.destroy();
+          return reject(new Error('tumblr page too large'));
+        }
+        chunks.push(d);
+      });
+      res.on('end', resolve);
+      res.on('error', reject);
+    });
+    const html = chunks.join('');
+    if (html.includes('login-wall')) return [];
+
+    const titleMatch = html.match(/property=["']og:title["'][^>]+content=["']([^"']+)["']/) ||
+                       html.match(/<title>([^<]+)<\/title>/);
+    const pageTitle = (titleMatch ? titleMatch[1].trim() : '') || 'Tumblr 이미지';
+
+    // The post's own media sits in SSR JSON before ___INITIAL_STATE___;
+    // media after that marker belongs to related/recommended posts.
+    const stateIdx = html.indexOf('___INITIAL_STATE___');
+    const postHtml = stateIdx > 0 ? html.slice(0, stateIdx) : html;
+    let groups = parseTumblrMediaFromHtml(postHtml);
+    if (!groups.length) groups = parseTumblrMediaFromHtml(html);
+    return groups.map((g, i) => ({
+      itemUrl:   g.best.url,
+      title:     groups.length > 1 ? `${pageTitle} (${i + 1})` : pageTitle,
+      uploader:  '',
+      thumbnail: (g.staticBest || g.best).url,
+      duration:  null,
+      mediaType: 'image',
+      formats:   [],
+    }));
+  } catch (e) {
+    console.error('[tumblr-media] error:', e.message);
+    return [];
+  } finally {
+    try { cookieBundle.cleanup(); } catch {}
   }
 }
 
