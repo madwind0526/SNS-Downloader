@@ -254,6 +254,23 @@ function isYouTubeUrl(url) {
   } catch { return false; }
 }
 
+function isTwitterUrl(url) {
+  try {
+    const h = new URL(url).hostname.replace(/^(www|m|mobile)\./, '');
+    return h === 'twitter.com' || h === 'x.com';
+  } catch { return false; }
+}
+
+// Reddit "/r/<sub>/s/<code>" share short links are not recognized by yt-dlp's
+// Reddit extractor, so the generic extractor fetches the page and gets 403-blocked.
+function isRedditShareUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /(^|\.)reddit\.com$/i.test(parsed.hostname) &&
+      /^\/r\/[^/]+\/s\/[^/]+/.test(parsed.pathname);
+  } catch { return false; }
+}
+
 // Returns extra yt-dlp args for sites that need special handling on Render (Linux datacenter IP).
 // YouTube: tv/tv_embedded clients have lighter BotGuard requirements than web/ios/android clients.
 // Tumblr:  longer sleep reduces 429 rate-limit errors; mobile UA improves IP-reputation score.
@@ -1104,6 +1121,83 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 const { version } = require('../package.json');
 app.get('/api/version', (req, res) => res.json({ version, platform: process.platform }));
 
+// ── yt-dlp version check / update ────────────
+let cachedLatestYtDlp = { version: null, fetchedAt: 0 };
+
+function getLocalYtDlpVersion() {
+  return new Promise(resolve => {
+    execFile(YT_DLP, ['--version'], { timeout: 15000 }, (err, stdout) => {
+      resolve(err ? null : String(stdout).trim());
+    });
+  });
+}
+
+async function getLatestYtDlpVersion() {
+  const now = Date.now();
+  if (cachedLatestYtDlp.version && now - cachedLatestYtDlp.fetchedAt < 60 * 60 * 1000) {
+    return cachedLatestYtDlp.version;
+  }
+  const res = await httpGetFollowRedirects('https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest');
+  if (res.statusCode !== 200) {
+    res.resume();
+    throw new Error(`GitHub API HTTP ${res.statusCode}`);
+  }
+  const chunks = [];
+  let total = 0;
+  res.setEncoding('utf8');
+  await new Promise((resolve, reject) => {
+    res.on('data', d => {
+      total += Buffer.byteLength(d, 'utf8');
+      if (total > 2 * 1024 * 1024) {
+        res.destroy();
+        return reject(new Error('GitHub API response too large'));
+      }
+      chunks.push(d);
+    });
+    res.on('end', resolve);
+    res.on('error', reject);
+  });
+  const tag = JSON.parse(chunks.join('')).tag_name;
+  if (!tag) throw new Error('tag_name missing in GitHub API response');
+  cachedLatestYtDlp = { version: String(tag).trim(), fetchedAt: now };
+  return cachedLatestYtDlp.version;
+}
+
+// GET /api/ytdlp/version — current binary version + latest GitHub release
+app.get('/api/ytdlp/version', async (req, res) => {
+  const current = await getLocalYtDlpVersion();
+  let latest = null;
+  let latestError = null;
+  try {
+    latest = await getLatestYtDlpVersion();
+  } catch (e) {
+    latestError = e.message;
+    console.error('[ytdlp/version] latest check failed:', e.message);
+  }
+  res.json({
+    current,
+    latest,
+    latestError,
+    updateAvailable: !!(current && latest && current !== latest),
+    canUpdate: process.platform === 'win32' && isLocalhostRequest(req),
+  });
+});
+
+// POST /api/ytdlp/update — self-update the bundled binary (PC local only)
+app.post('/api/ytdlp/update', requireLocalhostAction, (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(400).json({ error: '서버 모드에서는 yt-dlp를 직접 업데이트할 수 없습니다.' });
+  }
+  execFile(YT_DLP, ['-U'], { timeout: 180000, maxBuffer: 1024 * 1024 }, async (err, stdout, stderr) => {
+    if (err) {
+      return res.status(500).json({ error: `yt-dlp 업데이트 실패: ${String(stderr || err.message).slice(0, 300)}` });
+    }
+    cachedLatestYtDlp = { version: null, fetchedAt: 0 };
+    const version = await getLocalYtDlpVersion();
+    res.json({ ok: true, version, output: String(stdout).trim().slice(-500) });
+  });
+});
+
 // ── GET /api/storage/status ──────────────────
 // Reports safe storage diagnostics without exposing secrets.
 app.get('/api/storage/status', async (req, res) => {
@@ -1322,8 +1416,19 @@ app.get('/api/qr', async (req, res) => {
 // ── POST /api/info ───────────────────────────
 // Returns all media items from URL. Auto-retries with Chrome cookies on login errors.
 app.post('/api/info', async (req, res) => {
-  const { url } = req.body;
+  let { url } = req.body;
   if (!url) return res.status(400).json({ error: 'URL이 필요합니다.' });
+
+  // Reddit /s/ share links must be resolved to the canonical permalink first,
+  // otherwise yt-dlp falls back to the generic extractor and gets 403-blocked.
+  if (isRedditShareUrl(url)) {
+    try {
+      url = await resolveRedditShareUrl(url);
+      console.log('[info] resolved reddit share link:', url);
+    } catch (e) {
+      console.error('[info] reddit share link resolve failed:', e.message);
+    }
+  }
 
   // ── Threads custom handler (yt-dlp has no extractor for threads.com) ──────
   if (isThreadsUrl(url)) {
@@ -1350,10 +1455,10 @@ app.post('/api/info', async (req, res) => {
     '--playlist-items', '1-10',
   ];
 
-  const runYtDlp = async (withCookies = false) => {
+  const runYtDlp = async (withCookies = false, extraArgs = []) => {
     const cookieBundle = withCookies ? await requestCookiesArgs(req) : { args: [], cleanup: () => {} };
     return new Promise((resolve, reject) => {
-      const args = [...BASE_ARGS, ...cookieBundle.args, url];
+      const args = [...BASE_ARGS, ...extraArgs, ...cookieBundle.args, url];
       try {
         execFile(YT_DLP, args,
           { timeout: 90000, maxBuffer: 50 * 1024 * 1024 },
@@ -1392,6 +1497,25 @@ app.post('/api/info', async (req, res) => {
     return lines.map(l => {
       const info = JSON.parse(l);
       let fmts = info.formats || [];
+      // Image-only entries (--ignore-no-formats-error runs): no formats and no
+      // direct url — the largest thumbnail is the original image (e.g. Instagram
+      // photo posts/carousels serve full-resolution images as thumbnails).
+      if (!fmts.length && !info.url) {
+        const thumbs = Array.isArray(info.thumbnails) ? info.thumbnails : [];
+        const best = thumbs.reduce(
+          (a, b) => (!a || (b?.width || 0) >= (a?.width || 0) ? b : a), null);
+        if (best && /^https?:\/\//.test(best.url || '')) {
+          return {
+            itemUrl:   best.url,
+            title:     info.title,
+            uploader:  info.uploader || info.channel || '',
+            thumbnail: best.url,
+            duration:  null,
+            mediaType: 'image',
+            formats:   [],
+          };
+        }
+      }
       // Instagram-style: direct url instead of formats array — synthesize one entry
       if (!fmts.length && info.url) {
         const isVid = VIDEO_EXTS.has(info.ext || '');
@@ -1446,6 +1570,22 @@ app.post('/api/info', async (req, res) => {
     return 'unknown';
   };
 
+  // Image posts and image/video carousels: yt-dlp only emits video formats,
+  // so rerun with --ignore-no-formats-error and keep both real video entries
+  // and image entries recovered from full-resolution thumbnails.
+  const runImageFallback = async (withCookies) => {
+    try {
+      const stdout = await runYtDlp(withCookies, ['--ignore-no-formats-error']);
+      return parseStdout(stdout).filter(item =>
+        (item.formats && item.formats.length > 0) ||
+        (item.mediaType === 'image' &&
+          /^https?:\/\//.test(item.itemUrl || '') &&
+          item.itemUrl !== url));
+    } catch {
+      return [];
+    }
+  };
+
   try {
     const initialHasCookies = await requestHasCookies(req);
     let stdout;
@@ -1471,6 +1611,22 @@ app.post('/api/info', async (req, res) => {
           lastUse: firstCookieStatus.lastUse,
         } : null,
       });
+      // X hides sensitive tweets from unauthenticated access; when yt-dlp
+      // fails on an X/Twitter URL, try the public fxtwitter API before
+      // reporting an error to the user.
+      if (isTwitterUrl(url)) {
+        try {
+          const fxItems = await fetchFxTwitterItems(url);
+          if (fxItems.length) {
+            console.log('[info] fxtwitter fallback succeeded:', fxItems.length, 'item(s)');
+            return res.json({ items: fxItems });
+          }
+          console.log('[info] fxtwitter fallback returned no media');
+        } catch (fxErr) {
+          console.error('[info] fxtwitter fallback failed:', fxErr.message);
+        }
+      }
+
       const shouldRetryWithCookies = !initialHasCookies && (
         isLoginError(errText) ||
         ((isNoVideoError(errText) || isRateLimitedError(errText)) && hasCookies)
@@ -1512,6 +1668,13 @@ app.post('/api/info', async (req, res) => {
               lastUse: userCookie.lastUse,
             } : null,
           });
+          if (retryErrorKind === 'no_video') {
+            const imageItems = await runImageFallback(true);
+            if (imageItems.length) {
+              console.log('[info] image fallback succeeded after cookie retry:', imageItems.length, 'item(s)');
+              return res.json({ items: imageItems });
+            }
+          }
           if (retryErrorKind === 'no_video' && isTumblrUrl(url)) {
             return res.status(400).json({
               error: '쿠키로 재시도했지만 Tumblr가 이 포스트의 동영상을 반환하지 않았습니다. Tumblr에 로그인된 cookies.txt인지 확인하거나 PC mode / Phone via PC로 시도하세요.',
@@ -1549,6 +1712,11 @@ app.post('/api/info', async (req, res) => {
           });
         }
       } else if (isNoVideoError(errText)) {
+        const imageItems = await runImageFallback(initialHasCookies);
+        if (imageItems.length) {
+          console.log('[info] image fallback succeeded:', imageItems.length, 'item(s)');
+          return res.json({ items: imageItems });
+        }
         const images = await extractImagesFromPage(url);
         if (images.length) return res.json({ items: images });
         if (initialHasCookies && isTumblrUrl(url)) {
@@ -1571,6 +1739,9 @@ app.post('/api/info', async (req, res) => {
         }
         if (errText.includes('[Tumblr]'))   return res.status(400).json({ error: 'Tumblr 이미지 포스트는 지원되지 않습니다.' });
         if (errText.includes('[Pinterest]')) return res.status(400).json({ error: 'Pinterest 이미지 핀은 지원되지 않습니다.' });
+        if (isTwitterUrl(url)) {
+          return res.status(400).json({ error: '이 트윗에서 미디어를 찾을 수 없습니다. 민감 콘텐츠는 X에 로그인된 쿠키(auth_token)가 필요할 수 있습니다.' });
+        }
         return res.status(400).json({ error: '이 포스트에서 미디어를 찾을 수 없습니다.' });
       } else {
         return res.status(400).json({ error: parseYtDlpError(errText, url) });
@@ -1593,8 +1764,16 @@ app.post('/api/info', async (req, res) => {
 app.post('/api/download', async (req, res) => {
   const { url, format, title, itemUrl } = req.body;
   const prepareOnly = req.body.prepareOnly === true || req.body.prepareOnly === 'true';
-  const downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
+  let downloadUrl = itemUrl || url;  // use specific item URL for playlist/carousel items
   if (!downloadUrl) return res.status(400).json({ error: 'URL이 필요합니다.' });
+
+  if (isRedditShareUrl(downloadUrl)) {
+    try {
+      downloadUrl = await resolveRedditShareUrl(downloadUrl);
+    } catch (e) {
+      console.error('[download] reddit share link resolve failed:', e.message);
+    }
+  }
 
   const releaseSlot = reserveDownloadSlot();
   if (!releaseSlot) {
@@ -2139,7 +2318,15 @@ async function httpGetFollowRedirects(url, maxRedirects = 5) {
     const mod = checked.parsed.protocol === 'https:' ? https : http;
     const req = mod.get(checked.parsed, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      lookup: (hostname, options, callback) => callback(null, checked.address, checked.family),
+      // Node >= 20 autoSelectFamily calls lookup with options.all=true and
+      // expects an array callback; passing a bare string there fails with
+      // "Invalid IP address: undefined".
+      lookup: (hostname, options, callback) => {
+        if (options && options.all) {
+          return callback(null, [{ address: checked.address, family: checked.family }]);
+        }
+        return callback(null, checked.address, checked.family);
+      },
       timeout: 15000,
     }, res => {
       if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location && maxRedirects > 0) {
@@ -2220,6 +2407,115 @@ async function extractImagesFromPage(url) {
     console.error('[extractImages] error:', e.message);
     return [];
   }
+}
+
+// ── Reddit share link resolver ────────────────
+// Follows the /s/ short-link redirect chain (reddit.com hosts only) to the
+// canonical /comments/ permalink that yt-dlp's Reddit extractor understands.
+async function resolveRedditShareUrl(urlStr, maxRedirects = 4) {
+  let current = urlStr;
+  for (let i = 0; i < maxRedirects; i++) {
+    const parsed = new URL(current);
+    if (!/(^|\.)reddit\.com$/i.test(parsed.hostname)) break;
+    const location = await new Promise((resolve, reject) => {
+      const req = https.get(parsed, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept': 'text/html',
+        },
+        timeout: 10000,
+      }, res => {
+        const loc = [301, 302, 303, 307, 308].includes(res.statusCode) ? res.headers.location : null;
+        res.resume();
+        resolve(loc || null);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    });
+    if (!location) break;
+    current = new URL(location, current).href;
+  }
+  const cleaned = new URL(current);
+  if (!/(^|\.)reddit\.com$/i.test(cleaned.hostname)) return urlStr;
+  cleaned.search = '';
+  cleaned.hash = '';
+  return cleaned.href;
+}
+
+// ── fxtwitter fallback for X/Twitter ─────────
+// X hides sensitive-flagged tweets from all unauthenticated API access, so
+// yt-dlp fails without logged-in cookies. The public fxtwitter API serves
+// direct media URLs for such tweets; used only after yt-dlp fails.
+function twitterStatusFromUrl(urlStr) {
+  try {
+    const m = new URL(urlStr).pathname.match(/^\/([^/]+)\/status(?:es)?\/(\d+)/);
+    return m ? { user: m[1], id: m[2] } : null;
+  } catch { return null; }
+}
+
+async function fetchFxTwitterItems(urlStr) {
+  const status = twitterStatusFromUrl(urlStr);
+  if (!status) return [];
+  const apiUrl = `https://api.fxtwitter.com/${encodeURIComponent(status.user)}/status/${status.id}`;
+  const res = await httpGetFollowRedirects(apiUrl);
+  if (res.statusCode !== 200) {
+    res.resume();
+    return [];
+  }
+  const chunks = [];
+  let total = 0;
+  res.setEncoding('utf8');
+  await new Promise((resolve, reject) => {
+    res.on('data', d => {
+      total += Buffer.byteLength(d, 'utf8');
+      if (total > 2 * 1024 * 1024) {
+        res.destroy();
+        return reject(new Error('fxtwitter response too large'));
+      }
+      chunks.push(d);
+    });
+    res.on('end', resolve);
+    res.on('error', reject);
+  });
+  const data = JSON.parse(chunks.join(''));
+  const tweet = data && data.code === 200 ? data.tweet : null;
+  if (!tweet) return [];
+  const medias = tweet.media && Array.isArray(tweet.media.all) ? tweet.media.all : [];
+  const baseTitle = (tweet.text || '').replace(/\s+/g, ' ').trim().slice(0, 80) ||
+    `${tweet.author?.screen_name || 'X'} - ${tweet.id}`;
+  const uploader = tweet.author?.screen_name || '';
+  const items = [];
+  medias.forEach((m, i) => {
+    if (!m || typeof m.url !== 'string' || !/^https:\/\//.test(m.url)) return;
+    const title = medias.length > 1 ? `${baseTitle} (${i + 1})` : baseTitle;
+    if (m.type === 'video' || m.type === 'gif') {
+      items.push({
+        itemUrl:   m.url,
+        title,
+        uploader,
+        thumbnail: m.thumbnail_url || null,
+        duration:  m.duration || null,
+        mediaType: 'video',
+        formats:   [{
+          id: 'direct', ext: 'mp4',
+          height: m.height || null, width: m.width || null, fps: null,
+          vcodec: 'h264', acodec: 'aac',
+          video_ext: 'mp4', audio_ext: 'none', filesize: null,
+        }],
+      });
+    } else if (m.type === 'photo') {
+      items.push({
+        itemUrl:   m.url,
+        title,
+        uploader,
+        thumbnail: m.url,
+        duration:  null,
+        mediaType: 'image',
+        formats:   [],
+      });
+    }
+  });
+  return items;
 }
 
 // ── SSRF guard — block private/loopback/link-local IPs ──
@@ -2429,10 +2725,20 @@ function safeFilePath(filename, req = null) {
   return path.join(req ? getRequestDownloadsDir(req) : getDownloadsDir(), base);
 }
 
+// First "ERROR:" line from yt-dlp stderr, so users can see the real cause
+// alongside the translated message.
+function ytDlpErrorDetail(stderr) {
+  const m = String(stderr || '').match(/ERROR:\s*([^\r\n]+)/);
+  const line = (m ? m[1] : String(stderr || '').split(/\r?\n/)[0] || '').trim();
+  return line.slice(0, 180);
+}
+
 function parseYtDlpError(stderr, url = '') {
   if (!stderr) return '알 수 없는 오류';
   const isRender = process.platform !== 'win32';
   const s = String(stderr);
+  const detail = ytDlpErrorDetail(s);
+  const withDetail = msg => detail ? `${msg} (상세: ${detail})` : msg;
 
   if (s.includes('HTTP Error 429') || s.includes('Too Many Requests')) {
     if (isRender) return '서버 IP가 요청을 제한했습니다 (429). 잠시 후 다시 시도하거나 PC 모드를 사용해주세요.';
@@ -2441,22 +2747,26 @@ function parseYtDlpError(stderr, url = '') {
   if (s.includes('Sign in') || s.includes('login_required') || s.includes('LOGIN_REQUIRED') ||
       s.includes('This video is only available') || s.includes('confirm you') ) {
     if (isRender && isYouTubeUrl(url)) {
-      return 'YouTube가 서버 IP를 차단하고 있습니다. PC 모드를 사용해주세요.';
+      return withDetail('YouTube가 서버 IP를 차단하고 있습니다. PC 모드를 사용해주세요.');
     }
-    return '로그인이 필요한 영상입니다. 쿠키를 등록해주세요.';
+    return withDetail('로그인이 필요한 영상입니다. 쿠키를 등록해주세요.');
   }
-  if (s.includes('age') || s.includes('age-restricted') || s.includes('confirm your age')) {
+  // Word-boundary matching: a bare includes('age') also matches "webpage",
+  // "message", "image" and mislabels unrelated errors as age-restricted.
+  if (/age[-\s_]?restricted|confirm your age|age[-\s_]?gate|age verification|18\+/i.test(s)) {
     if (isRender) {
-      return `연령 제한 콘텐츠입니다. 서버 IP가 차단되었을 수 있습니다. PC 모드를 사용해주세요.`;
+      return withDetail('연령 제한 콘텐츠입니다. 서버 IP가 차단되었을 수 있습니다. PC 모드를 사용해주세요.');
     }
-    return '연령 제한 영상입니다. 로그인된 쿠키가 필요합니다.';
+    return withDetail('연령 제한 영상입니다. 로그인된 쿠키가 필요합니다.');
   }
+  if (s.includes('HTTP Error 403'))              return withDetail('사이트가 요청을 차단했습니다 (403).');
+  if (s.includes('HTTP Error 410'))              return withDetail('원본 미디어가 삭제되었습니다 (410).');
   if (s.includes('Private video'))               return '비공개 영상입니다.';
   if (s.includes('This video is not available')) return '이 지역에서 재생할 수 없는 영상입니다.';
   if (s.includes('Unsupported URL'))             return '지원하지 않는 URL입니다.';
   if (s.includes('HTTP Error 404'))              return '영상을 찾을 수 없습니다.';
   if (s.includes('ffmpeg') || s.includes('ffprobe')) return 'ffmpeg가 필요합니다.';
-  return '영상을 가져올 수 없습니다. URL을 확인해주세요.';
+  return withDetail('영상을 가져올 수 없습니다. URL을 확인해주세요.');
 }
 
 function getMimeType(ext) {

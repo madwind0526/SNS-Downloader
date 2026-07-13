@@ -1737,6 +1737,76 @@ $('clearFilesBtn').addEventListener('click', async () => {
   renderFiles();
 });
 
+// ── yt-dlp version check / update ─────────────
+const YTDLP_SKIP_KEY = 'ytdlpSkipVersion';
+
+function renderYtDlpVersion(d) {
+  const text = $('ytdlpVersionText');
+  const updateBtn = $('ytdlpUpdateBtn');
+  if (!text) return;
+  if (!d.current) {
+    text.textContent = 'yt-dlp 버전 확인 실패';
+  } else if (d.latest) {
+    text.textContent = d.updateAvailable
+      ? `현재 ${d.current} → 최신 ${d.latest}`
+      : `${d.current} (최신 버전)`;
+  } else {
+    text.textContent = `현재 ${d.current} (최신 버전 조회 실패)`;
+  }
+  if (updateBtn) updateBtn.style.display = (d.updateAvailable && d.canUpdate) ? '' : 'none';
+}
+
+async function checkYtDlpVersion({ silent = false } = {}) {
+  const text = $('ytdlpVersionText');
+  try {
+    if (text) text.textContent = '확인 중...';
+    const r = await apiFetch('/api/ytdlp/version');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '버전 확인 실패');
+    renderYtDlpVersion(d);
+    return d;
+  } catch (e) {
+    if (text) text.textContent = '버전 확인 실패';
+    if (!silent) alert('yt-dlp 버전 확인 실패: ' + e.message);
+    return null;
+  }
+}
+
+async function updateYtDlp() {
+  const btn = $('ytdlpUpdateBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '업데이트 중...'; }
+  try {
+    const r = await apiFetch('/api/ytdlp/update', { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || '업데이트 실패');
+    showToast(`yt-dlp 업데이트 완료 (${d.version})`);
+    localStorage.removeItem(YTDLP_SKIP_KEY);
+    await checkYtDlpVersion({ silent: true });
+  } catch (e) {
+    alert('yt-dlp 업데이트 실패: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '업데이트'; }
+  }
+}
+
+$('ytdlpCheckBtn')?.addEventListener('click', () => checkYtDlpVersion());
+$('ytdlpUpdateBtn')?.addEventListener('click', updateYtDlp);
+
+// PC local launch: check once, and offer the update unless this version
+// was already declined before
+if (isLocal) {
+  (async () => {
+    const d = await checkYtDlpVersion({ silent: true });
+    if (!d || !d.updateAvailable || !d.canUpdate) return;
+    if (localStorage.getItem(YTDLP_SKIP_KEY) === d.latest) return;
+    if (confirm(`yt-dlp 새 버전이 있습니다 (${d.current} → ${d.latest}).\n지금 업데이트할까요?`)) {
+      await updateYtDlp();
+    } else {
+      localStorage.setItem(YTDLP_SKIP_KEY, d.latest);
+    }
+  })();
+}
+
 // ── Helpers ──────────────────────────────────
 function formatSize(bytes) {
   if (!bytes) return '–';
