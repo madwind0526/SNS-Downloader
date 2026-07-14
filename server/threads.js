@@ -120,8 +120,13 @@ async function resolveTrustedPublicUrl(targetUrl) {
   return { parsed, address: addresses[0].address, family: addresses[0].family };
 }
 
+const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+// Meta serves fully server-side-rendered post content (including
+// video_versions JSON) to search engine crawlers.
+const CRAWLER_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
+
 // GET a URL with cookies; follows up to 5 redirects; returns { status, body }
-async function fetchUrl(targetUrl, cookieHeader, redirectCount) {
+async function fetchUrl(targetUrl, cookieHeader, redirectCount, userAgent) {
   if (redirectCount === undefined) redirectCount = 0;
   if (redirectCount > 5) throw new Error('Too many redirects');
   const checked = await resolveTrustedPublicUrl(targetUrl);
@@ -133,9 +138,17 @@ async function fetchUrl(targetUrl, cookieHeader, redirectCount) {
       path:     parsed.pathname + parsed.search,
       method:   'GET',
       timeout:  20000,
-      lookup:   (hostname, options, callback) => callback(null, checked.address, checked.family),
+      // Node >= 20 autoSelectFamily calls lookup with options.all=true and
+      // expects an array callback; a bare string there fails with
+      // "Invalid IP address: undefined".
+      lookup:   (hostname, options, callback) => {
+        if (options && options.all) {
+          return callback(null, [{ address: checked.address, family: checked.family }]);
+        }
+        return callback(null, checked.address, checked.family);
+      },
       headers: {
-        'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent':      userAgent || BROWSER_UA,
         'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept-Encoding': 'identity',  // avoid gzip — Node built-in https doesn't auto-decompress
@@ -156,7 +169,7 @@ async function fetchUrl(targetUrl, cookieHeader, redirectCount) {
         // Strip session cookie when redirecting to a different hostname
         const nextHostname = new URL(next).hostname;
         const nextCookie = nextHostname === parsed.hostname ? cookieHeader : '';
-        return fetchUrl(next, nextCookie, redirectCount + 1).then(resolve, reject);
+        return fetchUrl(next, nextCookie, redirectCount + 1, userAgent).then(resolve, reject);
       }
 
       let body = '';
@@ -191,8 +204,11 @@ function unescapeUrl(raw) {
 
 // Extract the best video URL from Threads page HTML.
 // Threads SSR embeds data as JSON inside <script> tags — video URLs appear as
-// "video_url":"https://..." in JSON blobs within those tags.
-function extractVideoUrl(html) {
+// "video_url":"https://..." in JSON blobs within those tags. In the crawler
+// (SSR) view the post JSON is nested inside another JSON string, so keys and
+// URLs arrive escaped (\"video_versions\", https:\/\/...) — scan a
+// backslash-normalized copy as well.
+function extractVideoUrlOnce(html) {
   // Strategy 1: explicit "video_url" JSON key (most reliable)
   const jsonKeyRe = /"video_url"\s*:\s*"(https:\/\/[^"\\]*(?:\\.[^"\\]*)*)"/g;
   let m = jsonKeyRe.exec(html);
@@ -209,6 +225,13 @@ function extractVideoUrl(html) {
   if (m) return unescapeUrl(m[0]);
 
   return null;
+}
+
+function extractVideoUrl(html) {
+  const direct = extractVideoUrlOnce(html);
+  if (direct) return direct;
+  const normalized = html.replace(/\\+"/g, '"').replace(/\\+\//g, '/');
+  return extractVideoUrlOnce(normalized);
 }
 
 // Extract thumbnail from og:image meta tag
@@ -245,13 +268,28 @@ async function fetchThreadsInfo(postUrl, cookiePath) {
     throw new Error('Threads 페이지 응답이 비어 있습니다. 쿠키가 유효한지 확인해 주세요.');
   }
 
-  const videoUrl = extractVideoUrl(body);
+  let videoUrl = extractVideoUrl(body);
+  let pageHtml = body;
+
+  // The browser view is a JS shell without post data; the crawler view is
+  // fully server-side rendered. Retry anonymously with a crawler UA
+  // (no cookies — never present a logged-in session as a bot).
+  if (!videoUrl) {
+    console.log('[threads] no video in browser view — retrying with crawler UA');
+    const crawler = await fetchUrl(postUrl, '', 0, CRAWLER_UA);
+    console.log(`[threads] crawler view status=${crawler.status} body_len=${crawler.body.length}`);
+    if (crawler.status === 200 && crawler.body.length > 500) {
+      videoUrl = extractVideoUrl(crawler.body);
+      if (videoUrl) pageHtml = crawler.body;
+    }
+  }
+
   if (!videoUrl) {
     throw new Error('이 포스트에서 영상 URL을 찾을 수 없습니다. 이미지 전용 포스트이거나 페이지 구조가 변경되었을 수 있습니다.');
   }
 
-  const thumbnail = extractThumbnail(body);
-  const title     = extractTitle(body);
+  const thumbnail = extractThumbnail(pageHtml);
+  const title     = extractTitle(pageHtml);
   const uploader  = extractUploader(postUrl);
 
   console.log(`[threads] ok title="${title}" uploader="${uploader}" video=${videoUrl.slice(0, 60)}...`);
