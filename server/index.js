@@ -17,7 +17,7 @@ const { Pool } = require('pg');
 const { isThreadsUrl, fetchThreadsInfo } = require('./threads');
 
 const app  = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3003;
 
 // ── Invite code and user sessions ────────────
 // ACCESS_TOKEN is an invite code for user registration on Render.

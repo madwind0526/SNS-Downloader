@@ -148,7 +148,7 @@ npm install
 npm start
 ```
 
-기본 주소는 `http://localhost:3001`입니다.
+기본 주소는 `http://localhost:3003`입니다.
 
 ## 알아두면 좋은 제한
 

@@ -355,7 +355,7 @@ async function loadAndroidQR() {
     try {
       const d = await (await apiFetch('/api/localip')).json();
       qrTarget = `http://${d.ip}:${d.port}`;
-    } catch { qrTarget = 'http://localhost:3001'; }
+    } catch { qrTarget = 'http://localhost:3003'; }
   }
 
   img.src = `/api/qr?url=${encodeURIComponent(qrTarget)}`;
@@ -471,7 +471,7 @@ $('platformPC')?.addEventListener('click', async () => {
   const left = Math.round((screen.availWidth  - w) / 2);
   const top  = Math.round((screen.availHeight - h) / 2);
   const popup = window.open(
-    'http://localhost:3001/?mode=app',
+    'http://localhost:3003/?mode=app',
     'snsdownloader-pc',
     `width=${w},height=${h},left=${left},top=${top},toolbar=no,location=no,menubar=no,status=no,resizable=yes`
   );

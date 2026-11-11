@@ -1,6 +1,6 @@
 # VideoDownloader
 
-> **Working directory: `C:\Claude\VideoDownloader`**
+> **Working directory: `G:\Claude\VideoDownloader`**
 
 ## Project Overview
 
@@ -104,7 +104,7 @@ UI strings (user-visible text in HTML) remain in Korean as-is.
 - UI 텍스트는 한국어
 - yt-dlp 바이너리 경로: `bin/yt-dlp.exe` (상대 경로)
 - 다운로드 임시 폴더: `downloads/` (세션 후 정리)
-- CORS는 로컬 개발 시에만 허용 (`localhost:3001`)
+- CORS는 로컬 개발 시에만 허용 (`localhost:3003`)
 
 ## Memory Bank
 

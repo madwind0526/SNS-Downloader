@@ -2,8 +2,8 @@
 cd /d "%~dp0"
 if not exist node_modules npm install
 
-:: Kill any existing process on port 3001
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3001 " ^| findstr "LISTENING"') do (
+:: Kill any existing process on port 3003
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":3003 " ^| findstr "LISTENING"') do (
   echo Stopping existing server PID %%a...
   taskkill /PID %%a /F >nul 2>&1
 )
@@ -13,7 +13,7 @@ timeout /t 1 /nobreak >nul
 start "SNS Downloader Server" node server/index.js
 
 :: Wait until server is ready (poll /health every 500ms, up to 15 seconds)
-powershell -NoProfile -Command "for ($i=0; $i -lt 30; $i++) { try { Invoke-WebRequest -Uri 'http://localhost:3001/health' -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop | Out-Null; break } catch {} ; Start-Sleep -Milliseconds 500 }"
+powershell -NoProfile -Command "for ($i=0; $i -lt 30; $i++) { try { Invoke-WebRequest -Uri 'http://localhost:3003/health' -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop | Out-Null; break } catch {} ; Start-Sleep -Milliseconds 500 }"
 
 :open
 set CHROME=
@@ -22,8 +22,8 @@ if exist "%PROGRAMFILES%\Google\Chrome\Application\chrome.exe" set "CHROME=%PROG
 if exist "%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe" set "CHROME=%PROGRAMFILES(X86)%\Google\Chrome\Application\chrome.exe"
 
 if not defined CHROME (
-  start "" "http://localhost:3001/?mode=app"
+  start "" "http://localhost:3003/?mode=app"
   goto :eof
 )
 
-start "" "%CHROME%" "--app=http://localhost:3001/?mode=app" --window-size=560,920
+start "" "%CHROME%" "--app=http://localhost:3003/?mode=app" --window-size=560,920
